@@ -1,0 +1,12 @@
+.env
+state.json
+runtime/
+.git/
+.github/
+assets/
+docs/
+test_*.py
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

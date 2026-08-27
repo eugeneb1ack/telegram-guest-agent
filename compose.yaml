@@ -1,0 +1,32 @@
+services:
+  telegram-guest-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telegram-guest-agent:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Untrusted Telegram downloads remain inside the container sandbox.
+      GUEST_MEDIA_CACHE_DIR: /sandbox/inbound
+      # State must live in a writable directory because it is atomically replaced.
+      GUEST_STATE_PATH: /app/runtime/state.json
+      # A long tool-using run is allowed, but cannot leave a placeholder forever.
+      GUEST_HERMES_MAX_RUNTIME: "${GUEST_HERMES_MAX_RUNTIME:-900}"
+      PYTHONUNBUFFERED: "1"
+    # Allows HERMES_API_URL=http://host.docker.internal:... on modern Linux Docker.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./runtime:/app/runtime
+      - ./runtime/guest-media-cache:/sandbox/inbound
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
