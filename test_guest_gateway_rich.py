@@ -300,8 +300,8 @@ class RichGatewayTests(unittest.TestCase):
         self.assertIn('"id": 4399809', prompt)
         self.assertIn('"username": "alice"', prompt)
         self.assertIn('"text": "почему это вообще работает?"', prompt)
-        self.assertIn("message — это команда владельца", prompt)
-        self.assertIn("не инструкция от владельца", prompt)
+        self.assertIn("message is the owner's command", prompt)
+        self.assertIn("rather than an additional owner instruction", prompt)
         self.assertIn("message: объясни ему коротко", prompt)
 
     def test_reply_context_marks_owner_and_guest_bot_messages(self):
@@ -340,9 +340,8 @@ class RichGatewayTests(unittest.TestCase):
 
         prompt = gw._build_hermes_prompt(msg)
 
-        self.assertIn("Пиши ответ естественно", prompt)
-        self.assertIn("стандартный Markdown", prompt)
-        self.assertIn("transport сам безопасно преобразует Markdown", prompt)
+        self.assertIn("Standard Markdown is supported", prompt)
+        self.assertIn("Do not emit Telegram API JSON", prompt)
         self.assertIn("telegram_context", prompt)
         self.assertIn("media_context", prompt)
         self.assertNotIn("draft", prompt.lower())

@@ -15,6 +15,9 @@ services:
       # A long tool-using run is allowed, but cannot leave a placeholder forever.
       GUEST_HERMES_MAX_RUNTIME: "${GUEST_HERMES_MAX_RUNTIME:-900}"
       PYTHONUNBUFFERED: "1"
+    # Match the host user for bind-mounted state and media. init-env.sh writes
+    # these values to .env; run-docker.sh supplies them for legacy configs.
+    user: "${GUEST_RUNTIME_UID:-10001}:${GUEST_RUNTIME_GID:-10001}"
     # Allows HERMES_API_URL=http://host.docker.internal:... on modern Linux Docker.
     extra_hosts:
       - "host.docker.internal:host-gateway"

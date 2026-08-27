@@ -46,7 +46,7 @@ Set at least `GUEST_BOT_TOKEN`, `GUEST_OWNER_ID`, `HERMES_API_URL`, `HERMES_API_
 Run a connectivity check before enabling polling:
 
 ```bash
-docker compose run --rm --no-deps telegram-guest-agent --check
+./run-docker.sh --check
 ```
 
 ## Harness contract
@@ -64,7 +64,7 @@ Both modes expect a bearer token and return ordinary text. Chat Completions resp
 
 - Do not reuse the Telegram token of another polling bot.
 - `.env`, `runtime/`, `state.json`, generated media, and logs are ignored by Git. Never commit or publish them.
-- `runtime/state.json` can contain queued Telegram update payloads. The gateway writes it atomically with owner-only file permissions where supported; the Docker helper creates `runtime/` with mode `0700`.
+- `runtime/state.json` can contain queued Telegram update payloads. The gateway writes it atomically with owner-only file permissions where supported; the Docker helper runs as the host UID/GID so `runtime/` may remain `0700` and state files `0600`.
 - Inbound media is untrusted and lands in `/sandbox/inbound` in Docker. The container is non-root, read-only, drops Linux capabilities, uses `no-new-privileges`, and has a constrained temporary filesystem.
 - Local files may be staged only from `GUEST_OWNER_MEDIA_ALLOWED_DIRS`. Everything else is rejected. Public responses redact `MEDIA:`, `file://`, Windows paths, and sensitive POSIX paths.
 - Rotate credentials if they ever appear in a terminal capture, issue, commit, or public message.

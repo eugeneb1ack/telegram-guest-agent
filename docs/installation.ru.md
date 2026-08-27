@@ -6,10 +6,22 @@
 
 - Бот, созданный через `@BotFather`, с включённым **Guest Mode** в Mini App BotFather.
 - Числовой Telegram ID пользователя, который будет единственным владельцем бота.
-- Docker Engine с Docker Compose v2 (рекомендуется) либо Python 3.12 для прямого запуска.
+- Git и Bash для готовых installation-скриптов.
+- Docker Engine с Docker Compose v2 и плагином Docker Buildx (рекомендуемый production-путь) либо Python 3.12 для прямого запуска.
 - URL и bearer-ключ вашего harness/агента.
 
 Создайте отдельного Telegram-бота. Тот же токен не должен одновременно опрашивать другой long-polling процесс.
+
+До клонирования проверьте зависимости хоста:
+
+```bash
+git --version
+docker version
+docker compose version
+docker buildx version
+```
+
+Для Docker-варианта на хост не устанавливаются Python-пакеты: runtime использует стандартную библиотеку и собирается в приложенный образ.
 
 ## 2. Настройка
 
@@ -72,7 +84,7 @@ Endpoint должен принимать `model`, `messages`, `stream: false`, b
 Сначала проверьте подключение:
 
 ```bash
-docker compose run --rm --no-deps telegram-guest-agent --check
+./run-docker.sh --check
 ```
 
 Команда проверяет Telegram-бота и пытается выполнить необязательный health-check harness. Затем запустите polling:
@@ -86,6 +98,8 @@ docker compose run --rm --no-deps telegram-guest-agent --check
 ```bash
 docker compose up --build
 ```
+
+`init-env.sh` записывает UID/GID текущего пользователя хоста в `.env`, а `run-docker.sh` подставляет те же значения для старых конфигураций. Поэтому непривилегированный контейнер пишет state в bind mount без ослабления прав доступа.
 
 Сервис настроен на автоматический restart. Логи:
 
@@ -105,15 +119,15 @@ docker compose logs -f telegram-guest-agent
 
 Входящие Telegram-файлы скачиваются в `GUEST_MEDIA_CACHE_DIR` и ограничиваются `GUEST_MEDIA_MAX_BYTES`. В Docker они остаются в `/sandbox/inbound`.
 
-Чтобы файл, сгенерированный harness, можно было прикрепить в публичный Telegram-ответ, явно задайте разрешённые каталоги:
+В Docker Compose host-side harness должен записывать публичный output-файл в `<репозиторий>/runtime/guest-media-cache`. Gateway видит этот mount как `/sandbox/inbound`; явно укажите путь хоста, чтобы входящие медиа и сгенерированный output проходили через один безопасный bridge:
 
 ```dotenv
 GUEST_OWNER_MEDIA_ENABLED=1
-GUEST_OWNER_MEDIA_ALLOWED_DIRS=/абсолютный/путь/к/разрешённым/файлам
-GUEST_MEDIA_HOST_DIR=/абсолютный/путь/к/файлам/который/видит/harness
+GUEST_OWNER_MEDIA_ALLOWED_DIRS=/sandbox/inbound
+GUEST_MEDIA_HOST_DIR=/абсолютный/путь/к/telegram-guest-agent/runtime/guest-media-cache
 ```
 
-Бот сначала отправляет разрешённый файл в личный чат владельца, получает Telegram `file_id` и использует его в публичном rich-ответе там, где это поддерживает Bot API. Файлы вне allowlist отклоняются; `MEDIA:`, `file://`, системные POSIX-пути и Windows-пути удаляются из публичного текста.
+Когда harness возвращает путь внутри `GUEST_MEDIA_HOST_DIR`, gateway сопоставляет его с `/sandbox/inbound`, проверяет, что это разрешённый обычный файл, сначала отправляет его владельцу в личный чат, получает Telegram `file_id` и использует его в публичном rich-ответе там, где это поддерживает Bot API. Пути вне allowlist отклоняются; `MEDIA:`, `file://`, системные POSIX-пути и Windows-пути удаляются из публичного текста. Для прямого Python-запуска задайте оба пути как явно разрешённый локальный каталог.
 
 `runtime/state.json` может содержать очередь и payload входящих сообщений. Не коммитьте, не архивируйте и не публикуйте `runtime/`, `.env`, логи и сгенерированные пользовательские файлы. Gateway записывает state атомарно и выставляет owner-only права там, где это поддерживает система.
 
@@ -132,6 +146,7 @@ python3 guest_gateway.py --poll
 
 ```bash
 git pull --ff-only
+./run-docker.sh --check
 docker compose up -d --build
 docker compose logs -f telegram-guest-agent
 ```

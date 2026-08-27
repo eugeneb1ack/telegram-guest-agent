@@ -6,10 +6,22 @@ This guide installs **Telegram Guest Agent** as a separate Telegram Guest Mode s
 
 - A Telegram bot created with `@BotFather`, with **Guest Mode** enabled in BotFather's Mini App.
 - The numeric Telegram user ID that is allowed to use the bot.
-- Docker Engine with Docker Compose v2 (recommended), or Python 3.12 for direct execution.
+- Git and Bash for the supplied installation scripts.
+- Docker Engine with Docker Compose v2 and the Docker Buildx plugin (recommended production path), or Python 3.12 for direct execution.
 - A harness endpoint and bearer key.
 
 Use a dedicated bot token. Do not point another long-polling process at this token.
+
+Verify host dependencies before cloning:
+
+```bash
+git --version
+docker version
+docker compose version
+docker buildx version
+```
+
+The Docker path installs no Python packages on the host: the runtime uses the standard library and is built into the supplied image.
 
 ## 2. Configure the agent
 
@@ -72,7 +84,7 @@ The gateway keeps the last six prompt/answer turns in memory for each active rep
 Run the check first:
 
 ```bash
-docker compose run --rm --no-deps telegram-guest-agent --check
+./run-docker.sh --check
 ```
 
 It verifies the Telegram bot and attempts a non-fatal harness health check. Then start polling:
@@ -86,6 +98,8 @@ or, without the helper:
 ```bash
 docker compose up --build
 ```
+
+`init-env.sh` records the host UID/GID in `.env`, and `run-docker.sh` supplies the same values for older configs. This lets the unprivileged container write its bind-mounted runtime state without loosening file permissions.
 
 The container restarts unless stopped. Follow its output with:
 
@@ -105,15 +119,15 @@ If a Telegram Guest Mode client delivers a plain reply separately, the gateway t
 
 Inbound Telegram files are downloaded under `GUEST_MEDIA_CACHE_DIR` and capped by `GUEST_MEDIA_MAX_BYTES`. Docker overrides the container path to `/sandbox/inbound`.
 
-If the harness generates a local file that should become a public Telegram attachment, set the following variables deliberately:
+For Docker Compose, a host-side harness must write any public output file under `<repository>/runtime/guest-media-cache`. The gateway sees that mount as `/sandbox/inbound`; set the host path explicitly so inbound media and generated output use the same safe bridge:
 
 ```dotenv
 GUEST_OWNER_MEDIA_ENABLED=1
-GUEST_OWNER_MEDIA_ALLOWED_DIRS=/absolute/path/visible/to/the-harness
-GUEST_MEDIA_HOST_DIR=/absolute/path/visible/to/the-harness
+GUEST_OWNER_MEDIA_ALLOWED_DIRS=/sandbox/inbound
+GUEST_MEDIA_HOST_DIR=/absolute/path/to/telegram-guest-agent/runtime/guest-media-cache
 ```
 
-The bot uploads an allowed file to the owner DM first, then reuses the returned Telegram `file_id` in the public reply where Telegram supports that media type. Paths outside the allowlist are refused, and local paths are redacted from public output.
+When the harness returns a path below `GUEST_MEDIA_HOST_DIR`, the gateway maps it back into `/sandbox/inbound`, verifies it is an allowed regular file, uploads it to the owner DM first, then reuses the returned Telegram `file_id` in the public reply where Telegram supports that media type. Paths outside the allowlist are refused, and local paths are redacted from public output. For direct Python execution, set both paths to an explicitly allowlisted local directory instead.
 
 ## Direct Python execution (optional)
 
@@ -130,6 +144,7 @@ Docker is the recommended production boundary for untrusted media.
 
 ```bash
 git pull --ff-only
+./run-docker.sh --check
 docker compose up -d --build
 docker compose logs -f telegram-guest-agent
 ```

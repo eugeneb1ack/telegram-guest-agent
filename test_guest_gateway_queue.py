@@ -653,7 +653,7 @@ class GuestQueueTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertNotIn("↴", (root / filename).read_text())
 
-    def test_prompt_pushes_current_fact_requests_to_tools_and_skills(self):
+    def test_prompt_is_generic_transport_context_without_harness_specific_skills(self):
         gw = FakeGateway()
         captured = {}
 
@@ -673,15 +673,11 @@ class GuestQueueTests(unittest.TestCase):
         messages = captured["payload"]["messages"]
         combined = "\n".join(m["content"] for m in messages)
         combined_lower = combined.lower()
-        self.assertIn("сначала используй инструменты", combined_lower)
-        self.assertIn("skill_view", combined)
-        self.assertIn("не угадывай", combined_lower)
-        self.assertIn("резервным картам", combined_lower)
-        self.assertIn("active Hermes profile", combined)
-        self.assertNotIn("SOUL.md", combined)
-        self.assertNotIn("Rootbot", combined)
-        self.assertIn("не пиши дисклеймер", combined_lower)
-        self.assertNotIn("не притворяйся", combined_lower)
+        self.assertIn("active harness profile", combined_lower)
+        self.assertIn("reply_to_message", combined)
+        self.assertIn("uses_prior_context", combined)
+        self.assertNotIn("browser skill", combined_lower)
+        self.assertNotIn("custom profile instruction", combined_lower)
         self.assertIn("Зябликово", combined)
 
     def test_direct_photo_without_reply_is_sent_to_hermes_as_visible_media_path(self):
@@ -710,7 +706,7 @@ class GuestQueueTests(unittest.TestCase):
         self.assertIn('"message_kinds": ["photo"]', combined)
         self.assertIn("direct-large", combined)
         self.assertIn(str(gw.cfg.media_host_dir), combined)
-        self.assertIn("фото/файл из текущего сообщения", combined)
+        self.assertIn("media_context describes downloaded files", combined)
         self.assertNotIn('"reply_to_message"', combined)
 
     def test_media_context_downloads_largest_photo_without_leaking_file_url(self):
@@ -931,6 +927,29 @@ class GuestQueueTests(unittest.TestCase):
         self.assertEqual(rich["blocks"][-1]["type"], "photo")
         self.assertEqual(rich["blocks"][-1]["photo"]["media"], "staged-photo")
 
+    def test_answer_guest_maps_allowed_host_harness_media_path_into_container_cache(self):
+        gw = MediaGateway()
+        host_media_dir = gw.tmp_path / "host-harness-media"
+        gw.cfg.media_host_dir = host_media_dir
+        local = gw.cfg.media_cache_dir / "cat.jpg"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(b"jpeg")
+
+        gw.answer_guest("q1", f"MEDIA:{host_media_dir / local.name}")
+
+        upload = [p for method, p in gw.calls if method == "sendPhoto"][0]
+        self.assertEqual(upload["path"], str(local))
+
+    def test_answer_guest_does_not_map_host_path_outside_configured_media_directory(self):
+        gw = MediaGateway()
+        gw.cfg.media_host_dir = gw.tmp_path / "host-harness-media"
+        outside = gw.tmp_path / "outside.jpg"
+        outside.write_bytes(b"jpeg")
+
+        gw.answer_guest("q1", f"MEDIA:{outside}")
+
+        self.assertEqual([method for method, _payload in gw.calls if method == "sendPhoto"], [])
+
     def test_answer_guest_refuses_local_file_outside_allowed_dirs(self):
         gw = MediaGateway()
         outside = gw.tmp_path / "outside.jpg"
@@ -973,6 +992,7 @@ class GuestQueueTests(unittest.TestCase):
         dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("read_only: true", compose)
         self.assertIn("/sandbox/inbound", compose)
+        self.assertIn('user: "${GUEST_RUNTIME_UID:-10001}:${GUEST_RUNTIME_GID:-10001}"', compose)
         self.assertIn("no-new-privileges:true", compose)
         self.assertIn("cap_drop:", compose)
         self.assertIn("USER guest", dockerfile)

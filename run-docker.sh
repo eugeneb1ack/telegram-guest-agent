@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+# The image runs unprivileged. Align it with the host user so the bind-mounted
+# runtime directory can remain owner-only rather than becoming world-writable.
+export GUEST_RUNTIME_UID="${GUEST_RUNTIME_UID:-$(id -u)}"
+export GUEST_RUNTIME_GID="${GUEST_RUNTIME_GID:-$(id -g)}"
 
 mkdir -p runtime runtime/guest-media-cache
 chmod 700 runtime runtime/guest-media-cache
@@ -22,6 +26,19 @@ fi
 command -v docker >/dev/null 2>&1 || {
   echo "docker is not installed or not on PATH" >&2
   exit 1
+}
+
+if [[ "${1:-}" == "--check" ]]; then
+  [[ "$#" -eq 1 ]] || {
+    echo "usage: $0 [--check]" >&2
+    exit 2
+  }
+  exec docker compose -f compose.yaml run --rm --no-deps telegram-guest-agent --check
+fi
+
+[[ "$#" -eq 0 ]] || {
+  echo "usage: $0 [--check]" >&2
+  exit 2
 }
 
 exec docker compose -f compose.yaml up --build --no-color
