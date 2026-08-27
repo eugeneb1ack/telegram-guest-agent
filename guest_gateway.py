@@ -59,42 +59,350 @@ RICH_MARKDOWN_BLOCK_MARKER_RE = re.compile(
 )
 MAX_SSE_EVENT_BYTES = 64 * 1024
 
-PROGRESS_TOOL_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("browser", "chrome", "playwright", "selenium"), "🌐 Использую браузер…"),
-    (("web_search", "search_query", "internet", "webpage", "url_fetch", "http", "crawl", "scrape"), "🔎 Ищу в интернете…"),
-    (("apply_patch", "patch", "edit_file", "write_file", "create_file", "codegen", "str_replace"), "✍️ Пишу код…"),
-    (("pytest", "unittest", "test", "lint", "compile", "build", "verify", "check"), "🧪 Проверяю результат…"),
-    (("terminal", "shell", "bash", "zsh", "powershell", "exec", "command", "process", "pty", "python", "node"), "⌨️ Использую командную строку…"),
-    (("read_file", "list_dir", "glob", "grep", "find", "document", "file", "read"), "📚 Изучаю материалы…"),
-    (("image", "vision", "photo", "canvas", "video"), "🎨 Работаю с изображением…"),
-    (("audio", "speech", "voice", "transcribe"), "🎧 Работаю с аудио…"),
-    (("database", "dataset", "spreadsheet", "sql", "csv"), "📊 Анализирую данные…"),
-    (("memory", "recall", "context"), "🧠 Проверяю контекст…"),
-    (("delegate", "subagent", "spawn_agent"), "🧩 Подключаю дополнительного агента…"),
+
+@dataclass(frozen=True)
+class ProgressActivity:
+    started: tuple[str, ...]
+    working: tuple[str, ...]
+    completed: tuple[str, ...]
+    failed: tuple[str, ...] = ("⚠️ Действие завершилось с ошибкой.",)
+
+
+@dataclass(frozen=True)
+class ProgressSignal:
+    text: str
+    activity_key: str = ""
+    heartbeat: tuple[str, ...] = ()
+
+
+PROGRESS_ACTIVITIES: dict[str, ProgressActivity] = {
+    "planning": ProgressActivity(
+        ("🧭 Разбираюсь в задаче…",),
+        ("💭 Планирую следующие шаги…", "🧩 Определяю подход…"),
+        ("✅ План готов.",),
+    ),
+    "reasoning": ProgressActivity(
+        ("🔎 Сверяю результаты…",),
+        ("🧠 Проверяю детали…", "📍 Собираю выводы…"),
+        ("✅ Результаты сверены.",),
+    ),
+    "answering": ProgressActivity(
+        ("✍️ Формирую ответ…",),
+        ("📝 Собираю ответ…", "🔎 Проверяю формулировки…"),
+        ("✅ Ответ готов.",),
+    ),
+    "skill": ProgressActivity(
+        ("📖 Открываю инструкцию…", "📖 Загружаю инструкцию…"),
+        ("📖 Изучаю инструкцию…", "📑 Сверяюсь с инструкцией…"),
+        ("✅ Инструкция изучена.",),
+    ),
+    "tool_discovery": ProgressActivity(
+        ("🧰 Подбираю нужный инструмент…",),
+        ("🧰 Проверяю доступные инструменты…", "🔍 Сверяю возможности инструментов…"),
+        ("✅ Инструмент подобран.",),
+    ),
+    "web_search": ProgressActivity(
+        ("🔎 Ищу источники в интернете…", "🌐 Проверяю информацию в интернете…"),
+        ("🌐 Собираю результаты поиска…", "🔎 Сверяю найденное…"),
+        ("✅ Источники найдены.", "✅ Поиск завершён."),
+    ),
+    "web_extract": ProgressActivity(
+        ("📄 Извлекаю данные со страницы…",),
+        ("📄 Разбираю содержимое страницы…", "🔎 Сверяю данные со страницы…"),
+        ("✅ Данные со страницы получены.",),
+    ),
+    "browser_navigation": ProgressActivity(
+        ("🌐 Открываю страницу…",),
+        ("🌐 Жду загрузки страницы…", "👀 Изучаю страницу…"),
+        ("✅ Страница открыта.",),
+    ),
+    "browser_inspect": ProgressActivity(
+        ("👀 Изучаю страницу…",),
+        ("🔍 Проверяю элементы страницы…", "🌐 Анализирую содержимое…"),
+        ("✅ Страница изучена.",),
+    ),
+    "browser_interact": ProgressActivity(
+        ("🖱 Работаю со страницей…",),
+        ("🌐 Взаимодействую со страницей…", "⏳ Жду отклика страницы…"),
+        ("✅ Действие в браузере выполнено.",),
+    ),
+    "computer": ProgressActivity(
+        ("🖥 Работаю с интерфейсом…",),
+        ("🖥 Выполняю действие в интерфейсе…", "⏳ Жду отклика интерфейса…"),
+        ("✅ Действие в интерфейсе выполнено.",),
+    ),
+    "terminal": ProgressActivity(
+        ("⌨️ Запускаю команду…", "⌨️ Выполняю команду…", "⌨️ Работаю в командной строке…"),
+        ("⌨️ Команда всё ещё выполняется…", "⏳ Жду завершения команды…"),
+        ("✅ Команда выполнена.",),
+        ("⚠️ Команда завершилась с ошибкой.",),
+    ),
+    "tests": ProgressActivity(
+        ("🧪 Запускаю тесты…",),
+        ("🧪 Тесты выполняются…", "📊 Проверяю результаты тестов…"),
+        ("✅ Тесты завершены.",),
+        ("⚠️ Тесты нашли ошибку.",),
+    ),
+    "code_check": ProgressActivity(
+        ("🔍 Проверяю код…",),
+        ("🧹 Анализирую качество кода…", "⏳ Проверка кода ещё выполняется…"),
+        ("✅ Проверка кода завершена.",),
+    ),
+    "dependencies": ProgressActivity(
+        ("📦 Подготавливаю зависимости…",),
+        ("📦 Устанавливаю зависимости…", "⏳ Жду завершения установки…"),
+        ("✅ Зависимости готовы.",),
+    ),
+    "build": ProgressActivity(
+        ("🏗 Собираю проект…",),
+        ("⚙️ Сборка выполняется…", "🔎 Проверяю ход сборки…"),
+        ("✅ Проект собран.",),
+        ("⚠️ Сборка завершилась с ошибкой.",),
+    ),
+    "system": ProgressActivity(
+        ("⚙️ Проверяю сервис…",),
+        ("⚙️ Сервис обрабатывает задачу…", "⏳ Жду ответа сервиса…"),
+        ("✅ Сервис проверен.",),
+    ),
+    "repository": ProgressActivity(
+        ("🔀 Проверяю репозиторий…",),
+        ("🔀 Сверяю изменения…", "📝 Анализирую состояние репозитория…"),
+        ("✅ Репозиторий проверен.",),
+    ),
+    "file_search": ProgressActivity(
+        ("🔍 Ищу в материалах…",),
+        ("📂 Просматриваю подходящие материалы…", "🔎 Сверяю найденные материалы…"),
+        ("✅ Поиск в материалах завершён.",),
+    ),
+    "file_read": ProgressActivity(
+        ("📄 Читаю материалы…",),
+        ("📑 Изучаю содержимое…", "📍 Выделяю важные детали…"),
+        ("✅ Материалы изучены.",),
+    ),
+    "script": ProgressActivity(
+        ("💻 Запускаю скрипт…",),
+        ("💻 Скрипт выполняется…", "⏳ Жду завершения скрипта…"),
+        ("✅ Скрипт выполнен.",),
+        ("⚠️ Скрипт завершился с ошибкой.",),
+    ),
+    "code_write": ProgressActivity(
+        ("✍️ Вношу изменения…", "✍️ Пишу код…"),
+        ("💻 Продолжаю редактирование…", "🧩 Собираю изменения…"),
+        ("✅ Изменения внесены.",),
+    ),
+    "workspace": ProgressActivity(
+        ("📂 Проверяю рабочее окружение…",),
+        ("📂 Изучаю структуру проекта…", "⚙️ Сверяю настройки окружения…"),
+        ("✅ Рабочее окружение проверено.",),
+    ),
+    "document": ProgressActivity(
+        ("📄 Открываю документ…",),
+        ("📑 Изучаю документ…", "📍 Выделяю важное в документе…"),
+        ("✅ Документ изучен.",),
+    ),
+    "image": ProgressActivity(
+        ("🎨 Работаю с изображением…",),
+        ("🖼 Обрабатываю изображение…", "🔍 Проверяю детали изображения…"),
+        ("✅ Работа с изображением завершена.",),
+    ),
+    "video": ProgressActivity(
+        ("🎬 Работаю с видео…",),
+        ("🎞 Обрабатываю видео…", "⏳ Проверяю ход обработки видео…"),
+        ("✅ Работа с видео завершена.",),
+    ),
+    "audio": ProgressActivity(
+        ("🎧 Работаю с аудио…",),
+        ("🎙 Обрабатываю аудио…", "⏳ Проверяю ход обработки аудио…"),
+        ("✅ Работа с аудио завершена.",),
+    ),
+    "data": ProgressActivity(
+        ("📊 Анализирую данные…",),
+        ("📈 Сверяю данные…", "🧮 Проверяю расчёты…"),
+        ("✅ Данные проанализированы.",),
+    ),
+    "memory": ProgressActivity(
+        ("🧠 Проверяю контекст…",),
+        ("🔎 Ищу связанную информацию…", "🧠 Сверяю найденный контекст…"),
+        ("✅ Контекст проверен.",),
+    ),
+    "plan": ProgressActivity(
+        ("📋 Сверяю план задачи…",),
+        ("📝 Обновляю ход работы…", "🧭 Сверяю следующие шаги…"),
+        ("✅ План задачи обновлён.",),
+    ),
+    "subagent": ProgressActivity(
+        ("🧩 Подключаю дополнительного агента…",),
+        ("🧩 Дополнительный агент работает…", "⏳ Жду результата дополнительного агента…"),
+        ("✅ Дополнительный агент завершил работу.",),
+    ),
+    "communication": ProgressActivity(
+        ("📨 Готовлю сообщение…",),
+        ("📨 Передаю сообщение…", "⏳ Проверяю доставку сообщения…"),
+        ("✅ Работа с сообщением завершена.",),
+    ),
+    "automation": ProgressActivity(
+        ("⏰ Настраиваю расписание…",),
+        ("⏰ Проверяю параметры автоматизации…", "📅 Сверяю расписание…"),
+        ("✅ Автоматизация настроена.",),
+    ),
+    "external": ProgressActivity(
+        ("🔌 Подключаю внешний инструмент…",),
+        ("🔌 Жду ответа внешнего инструмента…", "⚙️ Внешний инструмент обрабатывает задачу…"),
+        ("✅ Внешний инструмент завершил работу.",),
+    ),
+    "generic": ProgressActivity(
+        ("🛠 Подключаю нужный инструмент…", "🧰 Запускаю вспомогательный инструмент…"),
+        ("🛠 Инструмент обрабатывает задачу…", "⏳ Жду результата инструмента…"),
+        ("✅ Инструмент завершил работу.",),
+    ),
+}
+
+TOOL_ACTIVITY_GROUPS: dict[str, tuple[str, ...]] = {
+    "skill": ("skills_list", "skill_view", "skill_manage"),
+    "tool_discovery": ("tool_search", "setup_mcp"),
+    "web_search": ("web_search", "x_search"),
+    "web_extract": ("web_extract",),
+    "browser_navigation": ("browser_navigate",),
+    "browser_inspect": ("browser_snapshot", "browser_get_images", "browser_vision", "browser_console"),
+    "browser_interact": (
+        "browser_click", "browser_type", "browser_scroll", "browser_back",
+        "browser_press", "browser_exec", "browser_cdp", "browser_dialog",
+    ),
+    "computer": ("computer_use", "focus_pane"),
+    "terminal": ("terminal", "process", "close_terminal", "exec_command", "shell_command", "command"),
+    "script": ("execute_code",),
+    "tests": ("pytest", "unittest", "test"),
+    "code_check": ("lint", "compile", "verify"),
+    "file_read": ("read_terminal", "read_file"),
+    "file_search": ("search_files",),
+    "code_write": ("write_file", "patch", "apply_patch", "apply_layout", "annotate_preview"),
+    "workspace": ("project_list", "project_create", "project_switch"),
+    "document": ("open_preview", "read_preview", "close_preview", "drive_preview", "feishu_doc_read"),
+    "image": ("vision_analyze", "image_generate", "generate_image"),
+    "video": ("video_analyze", "video_generate", "xai_video_edit", "xai_video_extend"),
+    "audio": ("text_to_speech", "transcribe_audio"),
+    "memory": ("session_search", "memory", "memory_recall"),
+    "data": ("query_database",),
+    "subagent": ("delegate_task", "spawn_agent"),
+    "plan": (
+        "todo", "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
+        "kanban_unblock", "kanban_request_review", "kanban_request_changes",
+        "kanban_heartbeat", "kanban_comment", "kanban_create", "kanban_link",
+        "kanban_attach", "kanban_attach_url", "kanban_attachments",
+    ),
+    "communication": ("send_message", "react_to_message"),
+    "automation": ("cronjob",),
+}
+
+TOOL_ACTIVITY_NAMES: dict[str, str] = {
+    tool_name: activity_key
+    for activity_key, tool_names in TOOL_ACTIVITY_GROUPS.items()
+    for tool_name in tool_names
+}
+
+TOOL_ACTIVITY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("browser_", "browser_interact"), ("computer_", "computer"),
+    ("image_", "image"), ("vision_", "image"), ("video_", "video"),
+    ("audio_", "audio"), ("speech_", "audio"), ("transcri", "audio"),
+    ("database_", "data"), ("dataset_", "data"), ("spreadsheet_", "data"),
+    ("sql_", "data"), ("mcp_", "external"), ("ha_", "external"),
+    ("memory_", "memory"), ("spawn_", "subagent"),
+    ("feishu_", "document"), ("yb_", "communication"),
+    ("kanban_", "plan"), ("delegate_", "subagent"),
+)
+
+TERMINAL_ACTIVITY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:pytest|unittest|tox|vitest|jest|mocha|cargo\s+test|go\s+test|swift\s+test|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test)\b"), "tests"),
+    (re.compile(r"\b(?:ruff|flake8|mypy|pylint|eslint|prettier|shellcheck|golangci-lint|swiftlint|tsc|py_compile)\b"), "code_check"),
+    (re.compile(r"\b(?:npm|pnpm|yarn|pip|pip3|uv|poetry|cargo|brew)\s+(?:install|add|sync|ci)\b"), "dependencies"),
+    (re.compile(r"\b(?:xcodebuild|cmake|make|cargo\s+build|go\s+build|swift\s+build|npm\s+run\s+build|pnpm\s+(?:run\s+)?build|yarn\s+build)\b"), "build"),
+    (re.compile(r"\b(?:launchctl|systemctl|journalctl|service)\b|docker\s+compose\s+(?:logs|ps|restart|up|stop|start)\b"), "system"),
+    (re.compile(r"\b(?:docker|podman|kubectl|helm)\b"), "system"),
+    (re.compile(r"\bgit\b"), "repository"),
+    (re.compile(r"\b(?:curl|wget|httpie)\b"), "web_extract"),
+    (re.compile(r"\b(?:rg|grep|find|fd)\b"), "file_search"),
+    (re.compile(r"\b(?:cat|head|tail|less|sed|jq)\b"), "file_read"),
+    (re.compile(r"\b(?:python|python3|node|deno|bun|ruby|php|bash|zsh)\b"), "script"),
 )
 
 
+def _normalized_tool_name(tool_name: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(tool_name or "").casefold()).strip("_")
+
+
+def _activity_key_for_tool(tool_name: Any, preview: Any = None) -> str:
+    normalized = _normalized_tool_name(tool_name)
+    is_terminal = normalized in {"terminal", "process"} or normalized.endswith(("_terminal", "_process"))
+    if is_terminal and isinstance(preview, str):
+        command_hint = preview[:4096].casefold()
+        for pattern, activity_key in TERMINAL_ACTIVITY_RULES:
+            if pattern.search(command_hint):
+                return activity_key
+    for registered_name, activity_key in TOOL_ACTIVITY_NAMES.items():
+        if normalized == registered_name or normalized.endswith("_" + registered_name):
+            return activity_key
+    for prefix, activity_key in TOOL_ACTIVITY_PREFIXES:
+        if normalized.startswith(prefix) or ("_" + prefix) in normalized:
+            return activity_key
+    return "generic"
+
+
+def _status_variant(options: tuple[str, ...], variant: int) -> str:
+    return options[max(0, int(variant)) % len(options)]
+
+
+def progress_signal_for_event(
+    event: dict[str, Any],
+    variant: int = 0,
+    activity_key: str | None = None,
+) -> ProgressSignal | None:
+    """Map a lifecycle event to fixed public text without copying event payloads."""
+    event_type = str(event.get("event") or "")
+    if event_type in {"tool.started", "tool.completed", "tool.failed"}:
+        resolved_key = activity_key or _activity_key_for_tool(event.get("tool"), event.get("preview"))
+        activity = PROGRESS_ACTIVITIES.get(resolved_key, PROGRESS_ACTIVITIES["generic"])
+        if event_type == "tool.started":
+            tool_key = _normalized_tool_name(event.get("tool")) or "unknown"
+            return ProgressSignal(
+                _status_variant(activity.started, variant),
+                activity_key=f"tool:{tool_key}:{variant}",
+                heartbeat=activity.working,
+            )
+        failed = event_type == "tool.failed" or bool(event.get("error"))
+        return ProgressSignal(_status_variant(activity.failed if failed else activity.completed, variant))
+    if event_type == "run.started":
+        activity = PROGRESS_ACTIVITIES["planning"]
+        return ProgressSignal(activity.started[0], "phase:planning", activity.working)
+    if event_type == "reasoning.available":
+        activity = PROGRESS_ACTIVITIES["reasoning"]
+        return ProgressSignal(activity.started[0], "phase:reasoning", activity.working)
+    if event_type == "message.delta":
+        activity = PROGRESS_ACTIVITIES["answering"]
+        return ProgressSignal(activity.started[0], "phase:answering", activity.working)
+    if event_type == "subagent.start":
+        activity = PROGRESS_ACTIVITIES["subagent"]
+        return ProgressSignal(activity.started[0], f"subagent:{variant}", activity.working)
+    if event_type == "subagent.complete":
+        return ProgressSignal(PROGRESS_ACTIVITIES["subagent"].completed[0])
+    if event_type == "approval.request":
+        return ProgressSignal(
+            "⏳ Жду подтверждения…",
+            "phase:approval",
+            ("🔐 Для продолжения нужно подтверждение…",),
+        )
+    return None
+
+
 def anonymized_tool_status(tool_name: Any) -> str:
-    """Map a private harness tool name to a fixed public activity category."""
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(tool_name or "").casefold()).strip("_")
-    for markers, status in PROGRESS_TOOL_RULES:
-        if any(marker in normalized for marker in markers):
-            return status
-    return "🛠 Использую инструменты…"
+    """Return the first fixed public status for a private harness tool name."""
+    signal = progress_signal_for_event({"event": "tool.started", "tool": tool_name})
+    return signal.text if signal else PROGRESS_ACTIVITIES["generic"].started[0]
 
 
 def progress_status_for_event(event: dict[str, Any]) -> str | None:
-    """Return a public status without exposing tool arguments or event previews."""
-    event_type = str(event.get("event") or "")
-    if event_type == "tool.started":
-        return anonymized_tool_status(event.get("tool"))
-    if event_type == "reasoning.available":
-        return "💭 Обдумываю результат…"
-    if event_type == "subagent.start":
-        return "🧩 Подключаю дополнительного агента…"
-    if event_type == "approval.request":
-        return "⏳ Жду подтверждения…"
-    return None
+    """Compatibility helper returning only the public text for an event."""
+    signal = progress_signal_for_event(event)
+    return signal.text if signal else None
 
 
 def iter_sse_json_events(lines: Iterable[bytes]) -> Iterable[dict[str, Any]]:
@@ -136,18 +444,65 @@ def iter_sse_json_events(lines: Iterable[bytes]) -> Iterable[dict[str, Any]]:
 
 
 class ProgressReporter:
-    """Coalesce live status edits and guarantee none run after close()."""
+    """Rate-limit edits, animate active phases, and stop cleanly before final delivery."""
 
-    def __init__(self, send: Callable[[str], None], min_interval: float) -> None:
+    def __init__(self, send: Callable[[str], None], min_interval: float, heartbeat_interval: float = 4.0) -> None:
         self.send = send
         self.min_interval = max(0.0, float(min_interval))
+        self.heartbeat_interval = max(0.01, float(heartbeat_interval))
         self.lock = threading.Lock()
         self.send_lock = threading.Lock()
         self.last_text = ""
         self.last_sent_at = 0.0
         self.pending_text = ""
-        self.timer: threading.Timer | None = None
+        self.flush_timer: threading.Timer | None = None
+        self.heartbeat_timer: threading.Timer | None = None
+        self.heartbeat_phrases: tuple[str, ...] = ()
+        self.heartbeat_index = 0
+        self.activity_key = ""
+        self.activity_generation = 0
         self.closed = False
+
+    def update(self, signal: ProgressSignal) -> None:
+        if not isinstance(signal, ProgressSignal) or not signal.text.strip():
+            return
+        with self.lock:
+            if self.closed:
+                return
+            if signal.activity_key and signal.activity_key == self.activity_key:
+                return
+            self.activity_generation += 1
+            generation = self.activity_generation
+            self.activity_key = signal.activity_key
+            self.heartbeat_phrases = signal.heartbeat
+            self.heartbeat_index = 0
+            if self.heartbeat_timer is not None:
+                self.heartbeat_timer.cancel()
+                self.heartbeat_timer = None
+            if signal.activity_key and signal.heartbeat:
+                self._schedule_heartbeat_locked(generation)
+        self.report(signal.text)
+
+    def _schedule_heartbeat_locked(self, generation: int) -> None:
+        timer = threading.Timer(self.heartbeat_interval, self._heartbeat, args=(generation,))
+        timer.daemon = True
+        self.heartbeat_timer = timer
+        timer.start()
+
+    def _heartbeat(self, generation: int) -> None:
+        with self.lock:
+            self.heartbeat_timer = None
+            if (
+                self.closed
+                or generation != self.activity_generation
+                or not self.activity_key
+                or not self.heartbeat_phrases
+            ):
+                return
+            text = self.heartbeat_phrases[self.heartbeat_index % len(self.heartbeat_phrases)]
+            self.heartbeat_index += 1
+            self._schedule_heartbeat_locked(generation)
+        self.report(text)
 
     def report(self, text: str) -> None:
         text = str(text or "").strip()
@@ -160,21 +515,21 @@ class ProgressReporter:
             self.pending_text = text
             delay = max(0.0, self.min_interval - (time.monotonic() - self.last_sent_at))
             if delay == 0:
-                if self.timer is not None:
-                    self.timer.cancel()
-                    self.timer = None
+                if self.flush_timer is not None:
+                    self.flush_timer.cancel()
+                    self.flush_timer = None
                 deliver_now = True
-            elif self.timer is None:
-                self.timer = threading.Timer(delay, self._flush)
-                self.timer.daemon = True
-                self.timer.start()
+            elif self.flush_timer is None:
+                self.flush_timer = threading.Timer(delay, self._flush)
+                self.flush_timer.daemon = True
+                self.flush_timer.start()
         if deliver_now:
             self._flush()
 
     def _flush(self) -> None:
         with self.send_lock:
             with self.lock:
-                self.timer = None
+                self.flush_timer = None
                 if self.closed or not self.pending_text:
                     return
                 text = self.pending_text
@@ -194,10 +549,16 @@ class ProgressReporter:
     def close(self) -> None:
         with self.lock:
             self.closed = True
+            self.activity_generation += 1
+            self.activity_key = ""
+            self.heartbeat_phrases = ()
             self.pending_text = ""
-            if self.timer is not None:
-                self.timer.cancel()
-                self.timer = None
+            if self.flush_timer is not None:
+                self.flush_timer.cancel()
+                self.flush_timer = None
+            if self.heartbeat_timer is not None:
+                self.heartbeat_timer.cancel()
+                self.heartbeat_timer = None
         # Wait for an already-started edit so the final answer cannot be
         # overwritten by a late status update.
         with self.send_lock:
@@ -407,6 +768,7 @@ class Config:
     placeholder_custom_emoji_alt: str = "🤔"
     progress_enabled: bool = True
     progress_min_interval: float = 1.0
+    progress_heartbeat_interval: float = 4.0
     final_delivery_mode: str = "edit"
     placeholder_done_text: str = "Готово."
     reaction_accept: str = "👀"
@@ -463,6 +825,7 @@ class Config:
         placeholder_custom_emoji_alt = os.environ.get("GUEST_PLACEHOLDER_CUSTOM_EMOJI_ALT", "🤔").strip()
         progress_enabled = os.environ.get("GUEST_PROGRESS_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
         progress_min_interval = float(os.environ.get("GUEST_PROGRESS_MIN_INTERVAL", "1.0"))
+        progress_heartbeat_interval = float(os.environ.get("GUEST_PROGRESS_HEARTBEAT_INTERVAL", "4.0"))
         final_delivery_mode = os.environ.get("GUEST_FINAL_DELIVERY_MODE", "edit").strip().lower()
         if final_delivery_mode not in {"edit", "new_message_then_edit"}:
             final_delivery_mode = "edit"
@@ -501,6 +864,7 @@ class Config:
             placeholder_custom_emoji_alt=placeholder_custom_emoji_alt or "🤔",
             progress_enabled=progress_enabled,
             progress_min_interval=max(0.5, min(10.0, progress_min_interval)),
+            progress_heartbeat_interval=max(2.0, min(30.0, progress_heartbeat_interval)),
             final_delivery_mode=final_delivery_mode,
             placeholder_done_text=placeholder_done_text.strip() or "Готово.",
             owner_media_enabled=owner_media_enabled,
@@ -1937,10 +2301,11 @@ class GuestGateway:
                     progress_reporter = ProgressReporter(
                         lambda status: self.edit_guest_answer(inline_message_id, status),
                         self.cfg.progress_min_interval,
+                        self.cfg.progress_heartbeat_interval,
                     )
                 reply = self.call_hermes(
                     job.message,
-                    progress_callback=progress_reporter.report if progress_reporter else None,
+                    progress_callback=progress_reporter.update if progress_reporter else None,
                 )
                 print(
                     f"hermes reply ok update_id={job.update_id} elapsed={time.time() - started:.2f}s chars={len(reply)}",
@@ -2149,7 +2514,7 @@ class GuestGateway:
         base: str,
         run_id: str,
         headers: dict[str, str],
-        progress_callback: Callable[[str], None],
+        progress_callback: Callable[[ProgressSignal], None],
         stop_event: threading.Event,
     ) -> None:
         """Consume Hermes SSE lifecycle events without exposing event payloads."""
@@ -2166,12 +2531,24 @@ class GuestGateway:
                 request,
                 timeout=max(35, self.cfg.hermes_poll_timeout + 5),
             ) as response:
+                active_tool_activities: dict[str, str] = {}
+                event_sequence = 0
                 for event in iter_sse_json_events(response):
                     if stop_event.is_set():
                         break
-                    status = progress_status_for_event(event)
-                    if status:
-                        progress_callback(status)
+                    event_sequence += 1
+                    event_type = str(event.get("event") or "")
+                    tool_key = _normalized_tool_name(event.get("tool"))
+                    activity_key = None
+                    if event_type == "tool.started":
+                        activity_key = _activity_key_for_tool(event.get("tool"), event.get("preview"))
+                        if tool_key:
+                            active_tool_activities[tool_key] = activity_key
+                    elif event_type in {"tool.completed", "tool.failed"} and tool_key:
+                        activity_key = active_tool_activities.pop(tool_key, None)
+                    signal = progress_signal_for_event(event, event_sequence, activity_key)
+                    if signal:
+                        progress_callback(signal)
         except urllib.error.HTTPError as error:
             if not stop_event.is_set():
                 print(
@@ -2194,7 +2571,7 @@ class GuestGateway:
         base: str,
         run_id: str,
         headers: dict[str, str],
-        progress_callback: Callable[[str], None] | None,
+        progress_callback: Callable[[ProgressSignal], None] | None,
     ) -> tuple[threading.Event | None, threading.Thread | None]:
         if progress_callback is None:
             return None, None
@@ -2212,7 +2589,7 @@ class GuestGateway:
         self,
         message: dict[str, Any],
         prompt: str,
-        progress_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[ProgressSignal], None] | None = None,
     ) -> str:
         base = self._hermes_v1_base_url()
         headers = {"Authorization": f"Bearer {self.cfg.hermes_key}"}
@@ -2241,6 +2618,11 @@ class GuestGateway:
         if not run_id:
             raise RuntimeError("bad Hermes run response: " + redact(json.dumps(start_res, ensure_ascii=False)[:1000]))
         print("started hermes run", f"run_id={run_id}", flush=True)
+
+        if progress_callback is not None:
+            started_signal = progress_signal_for_event({"event": "run.started"})
+            if started_signal is not None:
+                progress_callback(started_signal)
 
         event_stop, event_thread = self._start_hermes_run_event_stream(
             base,
@@ -2289,7 +2671,7 @@ class GuestGateway:
         self,
         message: dict[str, Any],
         prompt: str,
-        progress_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[ProgressSignal], None] | None = None,
     ) -> str:
         attempts = max(1, self.cfg.hermes_run_max_attempts)
         last_error: Exception | None = None
@@ -2395,7 +2777,7 @@ class GuestGateway:
     def call_hermes(
         self,
         message: dict[str, Any],
-        progress_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[ProgressSignal], None] | None = None,
     ) -> str:
         prompt = self._build_hermes_prompt(message)
         if self.cfg.hermes_use_runs:

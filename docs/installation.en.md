@@ -45,6 +45,7 @@ HERMES_USE_RUNS=1
 HERMES_POLL_INTERVAL=1
 GUEST_PROGRESS_ENABLED=1
 GUEST_PROGRESS_MIN_INTERVAL=1.0
+GUEST_PROGRESS_HEARTBEAT_INTERVAL=4.0
 ```
 
 `GUEST_OWNER_ID` is mandatory and must be a positive integer. There is deliberately no default owner.
@@ -67,7 +68,9 @@ The start request receives `model`, `instructions`, `input`, and a stable `sessi
 
 `HERMES_POLL_INTERVAL` controls how soon a completed Run is delivered. The default of `1` second is a responsive production setting; the gateway enforces a floor of `0.5` seconds. Increase it only when your harness needs fewer status requests more than it needs lower delivery latency.
 
-When the optional SSE endpoint is available, the gateway replaces «Думаю…» with fixed public activity categories derived from real lifecycle events: browser use, internet search, command-line work, code changes, verification, reading materials, media, data, context, and subagents. It never forwards the raw tool name, arguments, event preview, command, URL, file name, local path, or model reasoning. `GUEST_PROGRESS_MIN_INTERVAL` limits Telegram edits to one per second by default and is bounded to `0.5–10` seconds. Set `GUEST_PROGRESS_ENABLED=0` to keep the static placeholder. If SSE is unavailable, Run polling and final delivery still work normally.
+When the optional SSE endpoint is available, the gateway replaces «Думаю…» with fixed public phases derived from real lifecycle events. Supported actions have distinct start, working, completion, and failure text. Long-running actions rotate through safe working phrases every `GUEST_PROGRESS_HEARTBEAT_INTERVAL` seconds (`4` by default, bounded to `2–30`). Terminal previews are used only in memory to distinguish broad actions such as tests, builds, scripts, repository checks, or file search.
+
+The gateway never forwards the raw tool name, arguments, event preview, command, URL, file name, local path, partial model output, or model reasoning. `GUEST_PROGRESS_MIN_INTERVAL` limits Telegram edits to one per second by default and is bounded to `0.5–10` seconds. Set `GUEST_PROGRESS_ENABLED=0` to keep the static placeholder. If SSE is unavailable, Run polling and final delivery still work normally.
 
 For Hermes, point `HERMES_API_URL` and `HERMES_API_KEY` to the API of the dedicated profile you want the guest agent to use. Persona, tools, and policy stay in that profile; this sidecar only carries Telegram transport context.
 
