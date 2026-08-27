@@ -443,6 +443,16 @@ class GuestQueueTests(unittest.TestCase):
         self.assertEqual(cfg.hermes_poll_interval, 0.5)
         self.assertEqual(cfg.hermes_max_runtime, 99)
 
+    def test_hermes_run_poll_interval_defaults_to_one_second(self):
+        env = {
+            "GUEST_BOT_TOKEN": "token",
+            "GUEST_OWNER_ID": "123456789",
+            "HERMES_API_KEY": "key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = Config.from_env()
+        self.assertEqual(cfg.hermes_poll_interval, 1.0)
+
     def test_compose_runtime_limit_allows_long_tool_runs(self):
         compose = (Path(__file__).parent / "compose.yaml").read_text()
         self.assertIn('GUEST_HERMES_MAX_RUNTIME: "${GUEST_HERMES_MAX_RUNTIME:-900}"', compose)
@@ -495,6 +505,43 @@ class GuestQueueTests(unittest.TestCase):
 
         self.assertEqual(calls[0]["payload"]["session_id"], gw._guest_session_id(message))
 
+    def test_runs_keep_reply_history_and_reset_new_sessions(self):
+        gw = FakeGateway()
+        gw.cfg.hermes_use_runs = True
+        gw.cfg.hermes_poll_interval = 0.01
+        start_payloads = []
+        outputs = iter(["first answer", "followup answer", "fresh answer"])
+        run_number = 0
+
+        def fake_http_json(url, payload=None, headers=None, timeout=60):
+            nonlocal run_number
+            if url.endswith("/v1/runs"):
+                run_number += 1
+                start_payloads.append(payload)
+                return {"run_id": f"run_{run_number}", "status": "started"}
+            if "/v1/runs/run_" in url:
+                return {"status": "completed", "output": next(outputs)}
+            raise AssertionError(f"unexpected url {url}")
+
+        first = update(1, "q1", "first question")["guest_message"]
+        first["_guest_context"] = {"mode": "standalone", "thread_id": "thread-a", "uses_prior_context": False}
+        followup = update(2, "q2", "followup question")["guest_message"]
+        followup["_guest_context"] = {"mode": "followup", "thread_id": "thread-a", "uses_prior_context": True}
+        fresh = update(3, "q3", "fresh question")["guest_message"]
+        fresh["_guest_context"] = {"mode": "standalone", "thread_id": "thread-b", "uses_prior_context": False}
+
+        with patch("guest_gateway.http_json", fake_http_json):
+            self.assertEqual(GuestGateway.call_hermes(gw, first), "first answer")
+            self.assertEqual(GuestGateway.call_hermes(gw, followup), "followup answer")
+            self.assertEqual(GuestGateway.call_hermes(gw, fresh), "fresh answer")
+
+        self.assertNotIn("conversation_history", start_payloads[0])
+        history = start_payloads[1]["conversation_history"]
+        self.assertIn("first question", "\n".join(item["content"] for item in history))
+        self.assertIn("first answer", "\n".join(item["content"] for item in history))
+        self.assertNotIn("conversation_history", start_payloads[2])
+        self.assertNotIn("reply_sessions", gw._load_state())
+
     def test_chat_completions_keep_reply_history_and_reset_new_sessions(self):
         gw = FakeGateway()
         gw.cfg.hermes_use_runs = False
@@ -527,7 +574,7 @@ class GuestQueueTests(unittest.TestCase):
         self.assertNotIn("first question", fresh_contents)
         self.assertNotIn("first answer", fresh_contents)
         self.assertNotIn("session_id", calls[1])
-        self.assertNotIn("chat_completion_sessions", gw._load_state())
+        self.assertNotIn("reply_sessions", gw._load_state())
 
     def test_run_poll_timeout_is_transient_not_final_failure(self):
         gw = FakeGateway()

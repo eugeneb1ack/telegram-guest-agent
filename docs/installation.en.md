@@ -42,6 +42,7 @@ HERMES_API_URL=http://host.docker.internal:8643/v1/chat/completions
 HERMES_API_KEY=replace-with-your-harness-key
 HERMES_MODEL=your-model-name
 HERMES_USE_RUNS=1
+HERMES_POLL_INTERVAL=1
 ```
 
 `GUEST_OWNER_ID` is mandatory and must be a positive integer. There is deliberately no default owner.
@@ -59,7 +60,9 @@ POST /v1/runs
 GET  /v1/runs/{run_id}
 ```
 
-The start request receives `model`, `instructions`, `input`, and a stable `session_id`. This is the best option for long tool-using work and durable harness-side conversation state.
+The start request receives `model`, `instructions`, `input`, and a stable `session_id`. For a valid reply to the guest answer, it also receives the bounded `conversation_history` buffer. This makes reply context reliable even when a Runs implementation treats `session_id` as an execution or memory scope rather than a transcript lookup key. This is the best option for long tool-using work and durable harness-side conversation state.
+
+`HERMES_POLL_INTERVAL` controls how soon a completed Run is delivered. The default of `1` second is a responsive production setting; the gateway enforces a floor of `0.5` seconds. Increase it only when your harness needs fewer status requests more than it needs lower delivery latency.
 
 For Hermes, point `HERMES_API_URL` and `HERMES_API_KEY` to the API of the dedicated profile you want the guest agent to use. Persona, tools, and policy stay in that profile; this sidecar only carries Telegram transport context.
 
@@ -77,7 +80,7 @@ The endpoint must accept `model`, `messages`, `stream: false`, bearer authentica
 {"choices":[{"message":{"content":"answer text"}}]}
 ```
 
-The gateway keeps the last six prompt/answer turns in memory for each active reply session. That history expires with `GUEST_PENDING_ANCHOR_TTL` (120 seconds by default) and is lost on gateway restart; it is never written into `state.json`.
+In both modes, the gateway keeps the last six prompt/answer turns in memory for each active reply session. That history expires with `GUEST_PENDING_ANCHOR_TTL` (120 seconds by default) and is lost on gateway restart; it is never written into `state.json`.
 
 ## 4. Start and verify
 

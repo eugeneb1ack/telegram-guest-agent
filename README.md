@@ -55,10 +55,10 @@ The gateway is intentionally narrow transport glue. Keep persona, tools, and pol
 
 | Mode | Required endpoint | Context contract |
 | --- | --- | --- |
-| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}` | Receives a stable `session_id`; recommended for Hermes and long tasks. |
-| `HERMES_USE_RUNS=0` | OpenAI-style `POST /v1/chat/completions` | Receives a normal `messages` array; this gateway supplies its bounded local reply history. |
+| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}` | Receives a stable `session_id` and, for a valid reply, the bounded `conversation_history`; recommended for Hermes and long tasks. |
+| `HERMES_USE_RUNS=0` | OpenAI-style `POST /v1/chat/completions` | Receives a normal `messages` array; this gateway supplies the same bounded local reply history. |
 
-Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
+Both modes retain up to six request/answer pairs for a valid reply session. The buffer expires with `GUEST_PENDING_ANCHOR_TTL`, is cleared when the sidecar restarts, and is never written to `state.json`. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
 
 ## Privacy and security model
 

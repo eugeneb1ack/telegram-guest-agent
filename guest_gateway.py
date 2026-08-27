@@ -297,7 +297,9 @@ class Config:
         hermes_use_runs = os.environ.get("HERMES_USE_RUNS", "1").lower() not in {"0", "false", "no", "off"}
         hermes_run_start_timeout = int(os.environ.get("HERMES_RUN_START_TIMEOUT", "30"))
         hermes_poll_timeout = int(os.environ.get("HERMES_POLL_TIMEOUT", "20"))
-        hermes_poll_interval = float(os.environ.get("HERMES_POLL_INTERVAL", "3"))
+        # One-second polling keeps final delivery responsive without creating
+        # an aggressive status-request loop for long tool-using runs.
+        hermes_poll_interval = float(os.environ.get("HERMES_POLL_INTERVAL", "1"))
         hermes_run_max_attempts = int(os.environ.get("HERMES_RUN_MAX_ATTEMPTS", "3"))
         hermes_run_retry_backoff = float(os.environ.get("HERMES_RUN_RETRY_BACKOFF", "2.0"))
         hermes_max_runtime = int(os.environ.get("GUEST_HERMES_MAX_RUNTIME", os.environ.get("HERMES_MAX_RUNTIME", "3600")))
@@ -370,8 +372,8 @@ class GuestGateway:
         # Keep a small, process-local transcript per short-lived Guest session so
         # reply continuation has the same semantics as the Hermes Runs API.
         # It is intentionally never written to state.json.
-        self.chat_completion_sessions: dict[str, dict[str, Any]] = {}
-        self.chat_completion_sessions_lock = threading.Lock()
+        self.reply_sessions: dict[str, dict[str, Any]] = {}
+        self.reply_sessions_lock = threading.Lock()
         self.pending_jobs: dict[str, GuestJob] = {}
         self.jobs: queue.Queue[GuestJob | None] = queue.Queue()
         self.workers: list[threading.Thread] = []
@@ -1983,12 +1985,18 @@ class GuestGateway:
         base = self._hermes_v1_base_url()
         headers = {"Authorization": f"Bearer {self.cfg.hermes_key}"}
         started = time.monotonic()
+        session_id, history = self._reply_session_history(message)
         payload = {
             "model": self.cfg.model,
             "instructions": self._hermes_instructions(),
             "input": prompt,
         }
-        session_id = self._guest_session_id(message)
+        # Hermes Runs accepts a stable session_id, but its Runs endpoint does
+        # not hydrate the short-term transcript from that id. Send the bounded
+        # reply history explicitly so a reply continues the preceding guest
+        # answer just like the Chat Completions fallback does.
+        if history:
+            payload["conversation_history"] = history
         if session_id:
             payload["session_id"] = session_id
         start_res = http_json(
@@ -2022,8 +2030,12 @@ class GuestGateway:
 
             state = status.get("status")
             if state == "completed":
+                response = status.get("output") or ""
+                if not isinstance(response, str):
+                    raise RuntimeError("bad Hermes run response: output is not text")
+                self._remember_reply_session_exchange(session_id, prompt, response)
                 print("hermes run completed", f"run_id={run_id}", f"elapsed={time.monotonic() - started:.2f}s", flush=True)
-                return status.get("output") or ""
+                return response
             if state in {"failed", "cancelled"}:
                 error = status.get("error") or f"Hermes run {run_id} {state}"
                 raise RuntimeError(f"Hermes run {run_id} {state}: {error}")
@@ -2053,38 +2065,42 @@ class GuestGateway:
                     time.sleep(delay)
         raise RuntimeError(str(last_error) if last_error else "Hermes run failed")
 
-    def _prune_chat_completion_sessions_locked(self, now: float) -> None:
-        """Bound process-local Chat Completions transcripts by the reply TTL."""
+    def _prune_reply_sessions_locked(self, now: float) -> None:
+        """Bound process-local reply transcripts by the configured reply TTL."""
         ttl = max(0.0, float(self.cfg.pending_anchor_ttl))
-        for session_id, entry in list(self.chat_completion_sessions.items()):
+        for session_id, entry in list(self.reply_sessions.items()):
             last_seen = float((entry or {}).get("last_seen_at") or 0)
             if not isinstance(entry, dict) or now - last_seen > ttl:
-                self.chat_completion_sessions.pop(session_id, None)
-        if len(self.chat_completion_sessions) > 200:
+                self.reply_sessions.pop(session_id, None)
+        if len(self.reply_sessions) > 200:
             ordered = sorted(
-                self.chat_completion_sessions.items(),
+                self.reply_sessions.items(),
                 key=lambda item: float((item[1] or {}).get("last_seen_at") or 0),
                 reverse=True,
             )
-            self.chat_completion_sessions = dict(ordered[:200])
+            self.reply_sessions = dict(ordered[:200])
 
-    def _chat_completion_messages(self, message: dict[str, Any], prompt: str) -> tuple[str | None, list[dict[str, str]]]:
+    def _reply_session_history(self, message: dict[str, Any]) -> tuple[str | None, list[dict[str, str]]]:
         session_id = self._guest_session_id(message)
-        messages = [{"role": "system", "content": self._hermes_instructions()}]
         if not session_id:
-            messages.append({"role": "user", "content": prompt})
-            return None, messages
+            return None, []
         now = time.time()
-        with self.chat_completion_sessions_lock:
-            self._prune_chat_completion_sessions_locked(now)
-            entry = self.chat_completion_sessions.get(session_id) or {}
+        with self.reply_sessions_lock:
+            self._prune_reply_sessions_locked(now)
+            entry = self.reply_sessions.get(session_id) or {}
             history = entry.get("messages") or []
             if isinstance(history, list):
-                messages.extend(item for item in history if isinstance(item, dict))
+                return session_id, [item for item in history if isinstance(item, dict)]
+        return session_id, []
+
+    def _chat_completion_messages(self, message: dict[str, Any], prompt: str) -> tuple[str | None, list[dict[str, str]]]:
+        session_id, history = self._reply_session_history(message)
+        messages = [{"role": "system", "content": self._hermes_instructions()}]
+        messages.extend(history)
         messages.append({"role": "user", "content": prompt})
         return session_id, messages
 
-    def _remember_chat_completion_exchange(self, session_id: str | None, prompt: str, response: str) -> None:
+    def _remember_reply_session_exchange(self, session_id: str | None, prompt: str, response: str) -> None:
         if not session_id:
             return
         now = time.time()
@@ -2092,9 +2108,9 @@ class GuestGateway:
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": response},
         ]
-        with self.chat_completion_sessions_lock:
-            self._prune_chat_completion_sessions_locked(now)
-            entry = self.chat_completion_sessions.setdefault(session_id, {"messages": []})
+        with self.reply_sessions_lock:
+            self._prune_reply_sessions_locked(now)
+            entry = self.reply_sessions.setdefault(session_id, {"messages": []})
             history = entry.setdefault("messages", [])
             if not isinstance(history, list):
                 history = []
@@ -2124,7 +2140,7 @@ class GuestGateway:
             raise RuntimeError("bad Hermes response: " + redact(json.dumps(res, ensure_ascii=False)[:1000]))
         if not isinstance(response, str):
             raise RuntimeError("bad Hermes response: response content is not text")
-        self._remember_chat_completion_exchange(session_id, prompt, response)
+        self._remember_reply_session_exchange(session_id, prompt, response)
         return response
 
     def call_hermes(self, message: dict[str, Any]) -> str:
