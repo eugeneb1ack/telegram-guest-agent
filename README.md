@@ -76,7 +76,7 @@ The project has no third-party Python runtime dependency.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -q
 python3 -m py_compile guest_gateway.py rich_renderer.py
-bash -n init-env.sh run-docker.sh install-launchagent.sh
+bash -n init-env.sh run-docker.sh install-launchagent.sh run.sh
 ```
 
 The test suite covers queue durability, context routing, Runs payloads, Chat Completions reply history, rich-message fallback, media constraints, and path sanitization.
