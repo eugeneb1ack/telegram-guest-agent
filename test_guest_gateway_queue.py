@@ -9,7 +9,7 @@ import weakref
 from pathlib import Path
 from unittest.mock import patch
 
-from guest_gateway import Config, GuestGateway, main
+from guest_gateway import Config, DEFAULT_STATE, GuestGateway, main
 
 
 class FakeGateway(GuestGateway):
@@ -602,6 +602,7 @@ class GuestQueueTests(unittest.TestCase):
     def test_compose_uses_directory_mounted_atomic_state_path(self):
         compose = (Path(__file__).parent / "compose.yaml").read_text(encoding="utf-8")
 
+        self.assertEqual(DEFAULT_STATE, Path(__file__).parent / "runtime" / "state.json")
         self.assertIn("GUEST_STATE_PATH: /app/runtime/state.json", compose)
         self.assertNotIn("./state.json:/app/state.json", compose)
 
@@ -979,12 +980,46 @@ class GuestQueueTests(unittest.TestCase):
             "MEDIA:/opt/guest-agent/secret.txt",
             "/usr/local/share/private.json",
             "/Applications/Private.app/config.json",
+            "/srv/guest-agent/private.json",
+            "/data/harness/output.png",
+            "/mnt/secure/cache.bin",
+            "/workspace/project/.env",
             r"C:\\Users\\owner\\secret.txt",
         ):
             with self.subTest(local_path=local_path):
                 sanitized = gw._sanitize_outbound_text(f"result: {local_path}")
                 self.assertIn("[локальный файл скрыт]", sanitized)
                 self.assertNotIn(local_path, sanitized)
+
+    def test_outbound_sanitizer_redacts_any_bare_posix_path_but_preserves_https_urls(self):
+        gw = MediaGateway()
+
+        text = "смотри /srv/guest-agent/output.png и https://example.test/assets/output.png"
+        sanitized = gw._sanitize_outbound_text(text)
+
+        self.assertIn("[локальный файл скрыт]", sanitized)
+        self.assertNotIn("/srv/guest-agent/output.png", sanitized)
+        self.assertIn("https://example.test/assets/output.png", sanitized)
+
+    def test_outbound_sanitizer_redacts_non_default_posix_path_in_markdown_image(self):
+        gw = MediaGateway()
+
+        sanitized = gw._sanitize_outbound_text("![output](/workspace/guest-agent/output.png)")
+
+        self.assertIn("Не удалось безопасно загрузить локальный файл", sanitized)
+        self.assertNotIn("/workspace/guest-agent/output.png", sanitized)
+
+    def test_media_download_creates_private_cache_and_file(self):
+        gw = MediaGateway()
+        downloaded = gw.cfg.media_cache_dir / "photo-inbound-file-1.jpg"
+
+        with patch("guest_gateway.http_bytes", return_value=b"jpeg"):
+            result = gw._download_tg_file("file-1", "photo", "inbound")
+
+        self.assertEqual(result["download"], "ok")
+        self.assertEqual(downloaded.read_bytes(), b"jpeg")
+        self.assertEqual(downloaded.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(gw.cfg.media_cache_dir.stat().st_mode & 0o777, 0o700)
 
     def test_docker_compose_sandbox_defaults_exist(self):
         root = Path(__file__).resolve().parent

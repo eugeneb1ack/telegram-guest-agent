@@ -9,4 +9,4 @@ compile:
 	$(PYTHON) -m py_compile guest_gateway.py rich_renderer.py
 
 check: compile test
-	bash -n init-env.sh run-docker.sh install-launchagent.sh
+	bash -n init-env.sh run-docker.sh install-launchagent.sh run.sh

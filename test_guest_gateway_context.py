@@ -317,13 +317,14 @@ def test_unregistered_other_bot_reply_plus_mention_is_anchored_new_not_sticky():
 
 def test_expired_registered_guest_bot_context_is_not_reused(monkeypatch):
     gw = gateway()
+    gw.cfg.pending_anchor_ttl = 1
     source = owner_message(text="@guest_bot first", message_id=22, entities=[mention_entity()])["guest_message"]
     sent = guest_bot_reply(message_id=94, text="old answer")
     gw._register_bot_message_context(source, sent, "thread-expired", "anchored_new")
     key = gw._bot_message_key(source, sent)
     gw.context_threads[key]["last_seen_at"] = 1
     gw.context_threads[key]["created_at"] = 1
-    monkeypatch.setattr("guest_gateway.time.time", lambda: 1 + 15 * 24 * 3600)
+    monkeypatch.setattr("guest_gateway.time.time", lambda: 2.5)
     msg = owner_message(text="@guest_bot продолжи", message_id=23, reply=sent, entities=[mention_entity()], update_id=110)["guest_message"]
     context = gw._context_info(msg, 110)
     assert context["mode"] == "unresolved_bot_reply"

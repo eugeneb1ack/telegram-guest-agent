@@ -15,6 +15,7 @@ import queue
 import re
 import shlex
 import signal
+import stat
 import sys
 import threading
 import time
@@ -28,14 +29,16 @@ from typing import Any
 from rich_renderer import media_block, render_blocks, safe_truncate
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_STATE = ROOT / "state.json"
+DEFAULT_STATE = ROOT / "runtime" / "state.json"
 DEFAULT_ENV = ROOT / ".env"
 DEFAULT_MEDIA_CACHE = ROOT / "runtime" / "guest-media-cache"
 MEDIA_DOWNLOAD_KINDS = {"photo", "sticker", "video", "animation", "video_note", "voice", "audio", "document"}
 LOCAL_PATH_PATTERN = re.compile(
     r"(?:"
     r"(?:MEDIA:|file://)(?P<path>/[^\s)\]>]+)"
-    r"|(?P<bare_path>/(?:Applications|Library|System|Users|Volumes|bin|dev|etc|home|opt|private|proc|root|run|sandbox|sbin|tmp|usr|var)/[^\s)\]>]+)"
+    # A standalone bare POSIX path with at least a root and a child. The
+    # boundary excludes URL paths and normal HTML closing tags such as </b>.
+    r"|(?<![A-Za-z0-9_.:/-])(?P<bare_path>/(?!/)[^\s/)\]>]+/[^\s)\]>]+)"
     r")",
     re.IGNORECASE,
 )
@@ -465,7 +468,10 @@ class GuestGateway:
 
     def _prune_context_threads(self, save: bool = True) -> None:
         now = time.time()
-        max_age = 14 * 24 * 3600
+        # A reply is a short-lived continuation signal, not a durable chat
+        # thread. Persist it only long enough to survive a sidecar restart
+        # inside the configured Guest reply window.
+        max_age = max(0.0, float(self.cfg.pending_anchor_ttl))
         changed = False
         for key, value in list(self.context_threads.items()):
             try:
@@ -593,12 +599,33 @@ class GuestGateway:
                 return info
             ext = self._file_ext(file_path, mime_type)
             cache_dir = self.cfg.media_cache_dir
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Direct-Python deployments may use a custom cache outside the
+            # Docker-managed runtime. Enforce the same owner-only boundary at
+            # the write point instead of relying on the caller's umask.
+            cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cache_dir.chmod(0o700)
             local_path = cache_dir / f"{self._safe_name(kind)}-{self._safe_name(label)}-{self._safe_name(file_id)}{ext}"
-            if not local_path.exists():
+            try:
+                existing_is_regular = stat.S_ISREG(local_path.lstat().st_mode)
+            except FileNotFoundError:
+                existing_is_regular = False
+            if existing_is_regular:
+                local_path.chmod(0o600)
+            else:
                 quoted_path = urllib.parse.quote(file_path)
                 url = f"https://api.telegram.org/file/bot{self.cfg.bot_token}/{quoted_path}"
-                local_path.write_bytes(http_bytes(url, timeout=60, max_bytes=self.cfg.media_max_bytes))
+                content = http_bytes(url, timeout=60, max_bytes=self.cfg.media_max_bytes)
+                temporary = cache_dir / f".{local_path.name}.tmp-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+                try:
+                    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(descriptor, "wb") as stream:
+                        stream.write(content)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, local_path)
+                    local_path.chmod(0o600)
+                finally:
+                    temporary.unlink(missing_ok=True)
             hermes_path = self._hermes_visible_media_path(local_path)
             info.update({
                 "download": "ok",
