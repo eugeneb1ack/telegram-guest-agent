@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from rich_renderer import media_block, render_blocks, safe_truncate
 
@@ -57,6 +57,151 @@ RICH_MARKDOWN_BLOCK_MARKER_RE = re.compile(
     r"|^\|.+\|\s*$|!\[[^\]]*\]\(https?://|\[\^[^\]]+\]:|<details\b|<summary\b|<tg-"
     r"|<table\b|<ul\b|<ol\b|<li\b|\$\$)"
 )
+MAX_SSE_EVENT_BYTES = 64 * 1024
+
+PROGRESS_TOOL_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("browser", "chrome", "playwright", "selenium"), "🌐 Использую браузер…"),
+    (("web_search", "search_query", "internet", "webpage", "url_fetch", "http", "crawl", "scrape"), "🔎 Ищу в интернете…"),
+    (("apply_patch", "patch", "edit_file", "write_file", "create_file", "codegen", "str_replace"), "✍️ Пишу код…"),
+    (("pytest", "unittest", "test", "lint", "compile", "build", "verify", "check"), "🧪 Проверяю результат…"),
+    (("terminal", "shell", "bash", "zsh", "powershell", "exec", "command", "process", "pty", "python", "node"), "⌨️ Использую командную строку…"),
+    (("read_file", "list_dir", "glob", "grep", "find", "document", "file", "read"), "📚 Изучаю материалы…"),
+    (("image", "vision", "photo", "canvas", "video"), "🎨 Работаю с изображением…"),
+    (("audio", "speech", "voice", "transcribe"), "🎧 Работаю с аудио…"),
+    (("database", "dataset", "spreadsheet", "sql", "csv"), "📊 Анализирую данные…"),
+    (("memory", "recall", "context"), "🧠 Проверяю контекст…"),
+    (("delegate", "subagent", "spawn_agent"), "🧩 Подключаю дополнительного агента…"),
+)
+
+
+def anonymized_tool_status(tool_name: Any) -> str:
+    """Map a private harness tool name to a fixed public activity category."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(tool_name or "").casefold()).strip("_")
+    for markers, status in PROGRESS_TOOL_RULES:
+        if any(marker in normalized for marker in markers):
+            return status
+    return "🛠 Использую инструменты…"
+
+
+def progress_status_for_event(event: dict[str, Any]) -> str | None:
+    """Return a public status without exposing tool arguments or event previews."""
+    event_type = str(event.get("event") or "")
+    if event_type == "tool.started":
+        return anonymized_tool_status(event.get("tool"))
+    if event_type == "reasoning.available":
+        return "💭 Обдумываю результат…"
+    if event_type == "subagent.start":
+        return "🧩 Подключаю дополнительного агента…"
+    if event_type == "approval.request":
+        return "⏳ Жду подтверждения…"
+    return None
+
+
+def iter_sse_json_events(lines: Iterable[bytes]) -> Iterable[dict[str, Any]]:
+    """Parse bounded JSON SSE data frames, ignoring comments and malformed events."""
+    data_lines: list[str] = []
+    data_bytes = 0
+    discard_frame = False
+    for raw_line in lines:
+        line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+        if not line:
+            if data_lines and not discard_frame:
+                try:
+                    event = json.loads("\n".join(data_lines))
+                except json.JSONDecodeError:
+                    event = None
+                if isinstance(event, dict):
+                    yield event
+            data_lines = []
+            data_bytes = 0
+            discard_frame = False
+            continue
+        if discard_frame or line.startswith(":") or not line.startswith("data:"):
+            continue
+        value = line[5:].lstrip()
+        data_bytes += len(value.encode("utf-8", "replace"))
+        if data_bytes > MAX_SSE_EVENT_BYTES:
+            data_lines = []
+            discard_frame = True
+            continue
+        data_lines.append(value)
+
+    if data_lines and not discard_frame:
+        try:
+            event = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            event = None
+        if isinstance(event, dict):
+            yield event
+
+
+class ProgressReporter:
+    """Coalesce live status edits and guarantee none run after close()."""
+
+    def __init__(self, send: Callable[[str], None], min_interval: float) -> None:
+        self.send = send
+        self.min_interval = max(0.0, float(min_interval))
+        self.lock = threading.Lock()
+        self.send_lock = threading.Lock()
+        self.last_text = ""
+        self.last_sent_at = 0.0
+        self.pending_text = ""
+        self.timer: threading.Timer | None = None
+        self.closed = False
+
+    def report(self, text: str) -> None:
+        text = str(text or "").strip()
+        if not text:
+            return
+        deliver_now = False
+        with self.lock:
+            if self.closed or text in {self.last_text, self.pending_text}:
+                return
+            self.pending_text = text
+            delay = max(0.0, self.min_interval - (time.monotonic() - self.last_sent_at))
+            if delay == 0:
+                if self.timer is not None:
+                    self.timer.cancel()
+                    self.timer = None
+                deliver_now = True
+            elif self.timer is None:
+                self.timer = threading.Timer(delay, self._flush)
+                self.timer.daemon = True
+                self.timer.start()
+        if deliver_now:
+            self._flush()
+
+    def _flush(self) -> None:
+        with self.send_lock:
+            with self.lock:
+                self.timer = None
+                if self.closed or not self.pending_text:
+                    return
+                text = self.pending_text
+                self.pending_text = ""
+                self.last_text = text
+                self.last_sent_at = time.monotonic()
+            try:
+                self.send(text)
+            except Exception as error:
+                print(
+                    "guest progress update failed:",
+                    redact(str(error))[:300],
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def close(self) -> None:
+        with self.lock:
+            self.closed = True
+            self.pending_text = ""
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
+        # Wait for an already-started edit so the final answer cannot be
+        # overwritten by a late status update.
+        with self.send_lock:
+            pass
 
 
 def load_dotenv(path: Path = DEFAULT_ENV) -> None:
@@ -260,6 +405,8 @@ class Config:
     placeholder_text: str = "Думаю…"
     placeholder_custom_emoji_id: str = ""
     placeholder_custom_emoji_alt: str = "🤔"
+    progress_enabled: bool = True
+    progress_min_interval: float = 1.0
     final_delivery_mode: str = "edit"
     placeholder_done_text: str = "Готово."
     reaction_accept: str = "👀"
@@ -314,6 +461,8 @@ class Config:
         placeholder_text = os.environ.get("GUEST_PLACEHOLDER_TEXT", "Думаю…")
         placeholder_custom_emoji_id = os.environ.get("GUEST_PLACEHOLDER_CUSTOM_EMOJI_ID", "").strip()
         placeholder_custom_emoji_alt = os.environ.get("GUEST_PLACEHOLDER_CUSTOM_EMOJI_ALT", "🤔").strip()
+        progress_enabled = os.environ.get("GUEST_PROGRESS_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+        progress_min_interval = float(os.environ.get("GUEST_PROGRESS_MIN_INTERVAL", "1.0"))
         final_delivery_mode = os.environ.get("GUEST_FINAL_DELIVERY_MODE", "edit").strip().lower()
         if final_delivery_mode not in {"edit", "new_message_then_edit"}:
             final_delivery_mode = "edit"
@@ -350,6 +499,8 @@ class Config:
             placeholder_text=placeholder_text.strip() or "Думаю…",
             placeholder_custom_emoji_id=placeholder_custom_emoji_id,
             placeholder_custom_emoji_alt=placeholder_custom_emoji_alt or "🤔",
+            progress_enabled=progress_enabled,
+            progress_min_interval=max(0.5, min(10.0, progress_min_interval)),
             final_delivery_mode=final_delivery_mode,
             placeholder_done_text=placeholder_done_text.strip() or "Готово.",
             owner_media_enabled=owner_media_enabled,
@@ -1773,6 +1924,7 @@ class GuestGateway:
                 self.jobs.task_done()
                 break
             inline_message_id = None
+            progress_reporter = None
             try:
                 started = time.time()
                 failed = False
@@ -1781,7 +1933,15 @@ class GuestGateway:
                         inline_message_id = self.answer_guest(job.guest_query_id, self.cfg.placeholder_text, job.message, purpose="placeholder")
                     except Exception as e:
                         print("guest placeholder answer failed:", redact(str(e))[:500], file=sys.stderr, flush=True)
-                reply = self.call_hermes(job.message)
+                if inline_message_id and self.cfg.progress_enabled:
+                    progress_reporter = ProgressReporter(
+                        lambda status: self.edit_guest_answer(inline_message_id, status),
+                        self.cfg.progress_min_interval,
+                    )
+                reply = self.call_hermes(
+                    job.message,
+                    progress_callback=progress_reporter.report if progress_reporter else None,
+                )
                 print(
                     f"hermes reply ok update_id={job.update_id} elapsed={time.time() - started:.2f}s chars={len(reply)}",
                     flush=True,
@@ -1790,6 +1950,9 @@ class GuestGateway:
                 failed = True
                 reply = "Сломалась на вызове агента: " + redact(str(e))[:1000]
                 print("hermes reply failed:", redact(str(e))[:500], flush=True)
+            finally:
+                if progress_reporter is not None:
+                    progress_reporter.close()
             uploaded_media = self._send_owner_media_for_reply(reply, job.guest_query_id)
             try:
                 if inline_message_id:
@@ -1981,7 +2144,76 @@ class GuestGateway:
         except Exception as e:
             print("hermes run stop failed:", redact(str(e))[:300], file=sys.stderr, flush=True)
 
-    def _call_hermes_run_once(self, message: dict[str, Any], prompt: str) -> str:
+    def _consume_hermes_run_events(
+        self,
+        base: str,
+        run_id: str,
+        headers: dict[str, str],
+        progress_callback: Callable[[str], None],
+        stop_event: threading.Event,
+    ) -> None:
+        """Consume Hermes SSE lifecycle events without exposing event payloads."""
+        event_headers = {
+            **headers,
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "User-Agent": "telegram-guest-agent/0.1",
+        }
+        url = f"{base}/runs/{urllib.parse.quote(run_id, safe='')}/events"
+        request = urllib.request.Request(url, headers=event_headers, method="GET")
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=max(35, self.cfg.hermes_poll_timeout + 5),
+            ) as response:
+                for event in iter_sse_json_events(response):
+                    if stop_event.is_set():
+                        break
+                    status = progress_status_for_event(event)
+                    if status:
+                        progress_callback(status)
+        except urllib.error.HTTPError as error:
+            if not stop_event.is_set():
+                print(
+                    "hermes run event stream unavailable:",
+                    f"HTTP {error.code}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as error:
+            if not stop_event.is_set():
+                print(
+                    "hermes run event stream unavailable:",
+                    redact(str(error))[:300],
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def _start_hermes_run_event_stream(
+        self,
+        base: str,
+        run_id: str,
+        headers: dict[str, str],
+        progress_callback: Callable[[str], None] | None,
+    ) -> tuple[threading.Event | None, threading.Thread | None]:
+        if progress_callback is None:
+            return None, None
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=self._consume_hermes_run_events,
+            args=(base, run_id, headers, progress_callback, stop_event),
+            name="guest-hermes-run-events",
+            daemon=True,
+        )
+        thread.start()
+        return stop_event, thread
+
+    def _call_hermes_run_once(
+        self,
+        message: dict[str, Any],
+        prompt: str,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> str:
         base = self._hermes_v1_base_url()
         headers = {"Authorization": f"Bearer {self.cfg.hermes_key}"}
         started = time.monotonic()
@@ -2010,45 +2242,62 @@ class GuestGateway:
             raise RuntimeError("bad Hermes run response: " + redact(json.dumps(start_res, ensure_ascii=False)[:1000]))
         print("started hermes run", f"run_id={run_id}", flush=True)
 
-        deadline = None if self.cfg.hermes_max_runtime <= 0 else started + self.cfg.hermes_max_runtime
-        while True:
-            if deadline is not None and time.monotonic() > deadline:
-                self._stop_hermes_run(run_id)
-                raise RuntimeError(f"Hermes run {run_id} exceeded GUEST_HERMES_MAX_RUNTIME={self.cfg.hermes_max_runtime}s")
-            try:
-                status = http_json(
-                    f"{base}/runs/{urllib.parse.quote(run_id)}",
-                    headers=headers,
-                    timeout=self.cfg.hermes_poll_timeout,
-                )
-            except Exception as e:
-                if not self._is_transient_poll_error(e):
-                    raise
-                print("hermes run poll transient failure:", redact(str(e))[:300], flush=True)
+        event_stop, event_thread = self._start_hermes_run_event_stream(
+            base,
+            run_id,
+            headers,
+            progress_callback,
+        )
+        try:
+            deadline = None if self.cfg.hermes_max_runtime <= 0 else started + self.cfg.hermes_max_runtime
+            while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    self._stop_hermes_run(run_id)
+                    raise RuntimeError(f"Hermes run {run_id} exceeded GUEST_HERMES_MAX_RUNTIME={self.cfg.hermes_max_runtime}s")
+                try:
+                    status = http_json(
+                        f"{base}/runs/{urllib.parse.quote(run_id)}",
+                        headers=headers,
+                        timeout=self.cfg.hermes_poll_timeout,
+                    )
+                except Exception as e:
+                    if not self._is_transient_poll_error(e):
+                        raise
+                    print("hermes run poll transient failure:", redact(str(e))[:300], flush=True)
+                    time.sleep(self.cfg.hermes_poll_interval)
+                    continue
+
+                state = status.get("status")
+                if state == "completed":
+                    response = status.get("output") or ""
+                    if not isinstance(response, str):
+                        raise RuntimeError("bad Hermes run response: output is not text")
+                    self._remember_reply_session_exchange(session_id, prompt, response)
+                    print("hermes run completed", f"run_id={run_id}", f"elapsed={time.monotonic() - started:.2f}s", flush=True)
+                    return response
+                if state in {"failed", "cancelled"}:
+                    error = status.get("error") or f"Hermes run {run_id} {state}"
+                    raise RuntimeError(f"Hermes run {run_id} {state}: {error}")
                 time.sleep(self.cfg.hermes_poll_interval)
-                continue
+        finally:
+            if event_stop is not None:
+                event_stop.set()
+            if event_thread is not None:
+                event_thread.join(timeout=2)
 
-            state = status.get("status")
-            if state == "completed":
-                response = status.get("output") or ""
-                if not isinstance(response, str):
-                    raise RuntimeError("bad Hermes run response: output is not text")
-                self._remember_reply_session_exchange(session_id, prompt, response)
-                print("hermes run completed", f"run_id={run_id}", f"elapsed={time.monotonic() - started:.2f}s", flush=True)
-                return response
-            if state in {"failed", "cancelled"}:
-                error = status.get("error") or f"Hermes run {run_id} {state}"
-                raise RuntimeError(f"Hermes run {run_id} {state}: {error}")
-            time.sleep(self.cfg.hermes_poll_interval)
-
-    def _call_hermes_run(self, message: dict[str, Any], prompt: str) -> str:
+    def _call_hermes_run(
+        self,
+        message: dict[str, Any],
+        prompt: str,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> str:
         attempts = max(1, self.cfg.hermes_run_max_attempts)
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
                 if attempt > 1:
                     print("retrying hermes run", f"attempt={attempt}/{attempts}", flush=True)
-                return self._call_hermes_run_once(message, prompt)
+                return self._call_hermes_run_once(message, prompt, progress_callback)
             except Exception as e:
                 last_error = e
                 if attempt >= attempts or not self._is_transient_hermes_run_error(e):
@@ -2143,10 +2392,14 @@ class GuestGateway:
         self._remember_reply_session_exchange(session_id, prompt, response)
         return response
 
-    def call_hermes(self, message: dict[str, Any]) -> str:
+    def call_hermes(
+        self,
+        message: dict[str, Any],
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> str:
         prompt = self._build_hermes_prompt(message)
         if self.cfg.hermes_use_runs:
-            return self._call_hermes_run(message, prompt)
+            return self._call_hermes_run(message, prompt, progress_callback)
         return self._call_hermes_chat_completion(message, prompt)
 
     def handle_guest(self, update: dict[str, Any], dry_run: bool = False) -> None:

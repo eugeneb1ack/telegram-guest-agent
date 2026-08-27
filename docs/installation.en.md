@@ -43,6 +43,8 @@ HERMES_API_KEY=replace-with-your-harness-key
 HERMES_MODEL=your-model-name
 HERMES_USE_RUNS=1
 HERMES_POLL_INTERVAL=1
+GUEST_PROGRESS_ENABLED=1
+GUEST_PROGRESS_MIN_INTERVAL=1.0
 ```
 
 `GUEST_OWNER_ID` is mandatory and must be a positive integer. There is deliberately no default owner.
@@ -58,11 +60,14 @@ Set `HERMES_USE_RUNS=1` when the harness supports:
 ```text
 POST /v1/runs
 GET  /v1/runs/{run_id}
+GET  /v1/runs/{run_id}/events  # optional SSE progress stream
 ```
 
 The start request receives `model`, `instructions`, `input`, and a stable `session_id`. For a valid reply to the guest answer, it also receives the bounded `conversation_history` buffer. This makes reply context reliable even when a Runs implementation treats `session_id` as an execution or memory scope rather than a transcript lookup key. This is the best option for long tool-using work and durable harness-side conversation state.
 
 `HERMES_POLL_INTERVAL` controls how soon a completed Run is delivered. The default of `1` second is a responsive production setting; the gateway enforces a floor of `0.5` seconds. Increase it only when your harness needs fewer status requests more than it needs lower delivery latency.
+
+When the optional SSE endpoint is available, the gateway replaces «Думаю…» with fixed public activity categories derived from real lifecycle events: browser use, internet search, command-line work, code changes, verification, reading materials, media, data, context, and subagents. It never forwards the raw tool name, arguments, event preview, command, URL, file name, local path, or model reasoning. `GUEST_PROGRESS_MIN_INTERVAL` limits Telegram edits to one per second by default and is bounded to `0.5–10` seconds. Set `GUEST_PROGRESS_ENABLED=0` to keep the static placeholder. If SSE is unavailable, Run polling and final delivery still work normally.
 
 For Hermes, point `HERMES_API_URL` and `HERMES_API_KEY` to the API of the dedicated profile you want the guest agent to use. Persona, tools, and policy stay in that profile; this sidecar only carries Telegram transport context.
 
@@ -81,6 +86,8 @@ The endpoint must accept `model`, `messages`, `stream: false`, bearer authentica
 ```
 
 In both modes, the gateway keeps the last six prompt/answer turns in memory for each active reply session. That history expires with `GUEST_PENDING_ANCHOR_TTL` (120 seconds by default) and is lost on gateway restart; it is never written into `state.json`.
+
+Chat Completions has no standard tool-lifecycle stream. In this mode the gateway keeps the static placeholder instead of showing guessed activity.
 
 ## 4. Start and verify
 

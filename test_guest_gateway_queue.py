@@ -36,7 +36,7 @@ class FakeGateway(GuestGateway):
             return {"ok": True, "result": {"inline_message_id": "sent-final"}}
         return {"ok": True, "result": []}
 
-    def call_hermes(self, message):
+    def call_hermes(self, message, progress_callback=None):
         self.hermes_calls.append(message.get("text"))
         time.sleep(0.01)
         return f"final: {message.get('text')}"
@@ -353,7 +353,7 @@ class GuestQueueTests(unittest.TestCase):
 
     def test_reactions_mark_failure_when_hermes_fails(self):
         class FailingGateway(FakeGateway):
-            def call_hermes(self, message):
+            def call_hermes(self, message, progress_callback=None):
                 raise RuntimeError("boom")
 
         gw = FailingGateway()

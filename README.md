@@ -14,6 +14,7 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 - Fails closed: only the numeric `GUEST_OWNER_ID` may invoke the agent.
 - Starts a new session for every standalone invocation; a reply to a recent guest answer continues its session for a configurable TTL (120 seconds by default).
 - Uses Hermes Runs when available, passing a stable `session_id`. For a standard OpenAI-compatible Chat Completions endpoint, it keeps a bounded, in-memory six-turn transcript for the same reply window.
+- Replaces the initial placeholder with live, privacy-safe activity such as «Использую браузер…» or «Пишу код…» when Hermes reports a real tool event.
 - Persists the delivery queue before acknowledging an update, so long agent runs do not block polling and survive a sidecar restart.
 - Downloads inbound media into a sandbox, caps its size, and sanitizes local paths in every public answer.
 - Stages explicitly allowed local output media through the owner DM before reusing the returned Telegram `file_id` in a public rich reply.
@@ -55,10 +56,16 @@ The gateway is intentionally narrow transport glue. Keep persona, tools, and pol
 
 | Mode | Required endpoint | Context contract |
 | --- | --- | --- |
-| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}` | Receives a stable `session_id` and, for a valid reply, the bounded `conversation_history`; recommended for Hermes and long tasks. |
+| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}`; optional `GET /v1/runs/{run_id}/events` | Receives a stable `session_id` and, for a valid reply, the bounded `conversation_history`; the SSE endpoint adds live activity updates. |
 | `HERMES_USE_RUNS=0` | OpenAI-style `POST /v1/chat/completions` | Receives a normal `messages` array; this gateway supplies the same bounded local reply history. |
 
 Both modes retain up to six request/answer pairs for a valid reply session. The buffer expires with `GUEST_PENDING_ANCHOR_TTL`, is cleared when the sidecar restarts, and is never written to `state.json`. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
+
+## Live activity status
+
+In Hermes Runs mode, the gateway consumes the structured SSE lifecycle stream and updates the existing Telegram placeholder only when the harness reports actual activity. Fixed public categories cover browser use, internet search, command-line work, code changes, verification, reading materials, media, data, context, and subagents. Unknown tools use the generic «Использую инструменты…» label.
+
+Only the event type and tool category are considered. Raw tool names, arguments, previews, commands, URLs, file names, local paths, and model reasoning are never sent to Telegram. Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GUEST_PROGRESS_ENABLED=0` to disable them. If the SSE endpoint is unavailable, final-answer polling continues normally and the placeholder stays unchanged. Chat Completions mode has no tool-event contract, so it deliberately keeps «Думаю…» instead of inventing activity.
 
 ## Privacy and security model
 
@@ -79,7 +86,7 @@ python3 -m py_compile guest_gateway.py rich_renderer.py
 bash -n init-env.sh run-docker.sh install-launchagent.sh run.sh
 ```
 
-The test suite covers queue durability, context routing, Runs payloads, Chat Completions reply history, rich-message fallback, media constraints, and path sanitization.
+The test suite covers queue durability, context routing, Runs payloads and live activity privacy, Chat Completions reply history, rich-message fallback, media constraints, and path sanitization.
 
 ## Repository layout
 
