@@ -75,6 +75,7 @@ Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GU
 - `.env`, `runtime/`, `state.json`, generated media, and logs are ignored by Git. Never commit or publish them.
 - `runtime/state.json` can contain queued Telegram update payloads. The gateway writes it atomically with owner-only file permissions where supported; the Docker helper runs as the host UID/GID so `runtime/` may remain `0700` and state files `0600`.
 - Inbound media is untrusted and lands in `/sandbox/inbound` in Docker. The container is non-root, read-only, drops Linux capabilities, uses `no-new-privileges`, and has a constrained temporary filesystem.
+- The Docker runner derives the host side of the media bridge from the active checkout on every start; Compose uses that exact path for both the bind mount and the path given to the harness, preventing stale media paths after a deployment move.
 - Local files may be staged only from `GUEST_OWNER_MEDIA_ALLOWED_DIRS`. Everything else is rejected. Public responses redact `MEDIA:`, `file://`, Windows paths, and sensitive POSIX paths.
 - Rotate credentials if they ever appear in a terminal capture, issue, commit, or public message.
 

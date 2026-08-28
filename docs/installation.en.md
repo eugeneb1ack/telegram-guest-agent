@@ -132,7 +132,7 @@ If a Telegram Guest Mode client delivers a plain reply separately, the gateway t
 
 Inbound Telegram files are downloaded under `GUEST_MEDIA_CACHE_DIR` and capped by `GUEST_MEDIA_MAX_BYTES`. Docker overrides the container path to `/sandbox/inbound`.
 
-For Docker Compose, a host-side harness must write any public output file under `<repository>/runtime/guest-media-cache`. The gateway sees that mount as `/sandbox/inbound`; set the host path explicitly so inbound media and generated output use the same safe bridge:
+For Docker Compose, a host-side harness must write any public output file under `<repository>/runtime/guest-media-cache`. The gateway sees that mount as `/sandbox/inbound`. `run-docker.sh` derives the absolute host path from the active checkout on every start, so moving or replacing the deployment cannot leave a stale media bridge. Set the path explicitly only when starting with raw `docker compose` or direct Python:
 
 ```dotenv
 GUEST_OWNER_MEDIA_ENABLED=1

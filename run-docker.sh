@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+# The Compose bind mount is relative to this checkout. Always derive the
+# host-visible side of that same mount from the checkout that is actually
+# starting the service. A persisted .env value can become stale after moving
+# or replacing a deployment and would make Hermes look for inbound media in a
+# different directory than the one mounted at /sandbox/inbound.
+GUEST_APP_DIR="$(pwd -P)"
+export GUEST_MEDIA_HOST_DIR="${GUEST_APP_DIR}/runtime/guest-media-cache"
 # The image runs unprivileged. Align it with the host user so the bind-mounted
 # runtime directory can remain owner-only rather than becoming world-writable.
 export GUEST_RUNTIME_UID="${GUEST_RUNTIME_UID:-$(id -u)}"

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shutil
@@ -6,6 +7,7 @@ import tempfile
 import time
 import unittest
 import weakref
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -653,6 +655,25 @@ class GuestQueueTests(unittest.TestCase):
         self.assertIn("GUEST_STATE_PATH: /app/runtime/state.json", compose)
         self.assertNotIn("./state.json:/app/state.json", compose)
 
+    def test_compose_media_bridge_uses_active_checkout_host_path(self):
+        root = Path(__file__).parent
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        runner = (root / "run-docker.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'GUEST_MEDIA_HOST_DIR: "${GUEST_MEDIA_HOST_DIR:-${PWD}/runtime/guest-media-cache}"',
+            compose,
+        )
+        self.assertIn(
+            "- ${GUEST_MEDIA_HOST_DIR:-./runtime/guest-media-cache}:/sandbox/inbound",
+            compose,
+        )
+        self.assertIn('GUEST_APP_DIR="$(pwd -P)"', runner)
+        self.assertIn(
+            'export GUEST_MEDIA_HOST_DIR="${GUEST_APP_DIR}/runtime/guest-media-cache"',
+            runner,
+        )
+
     def test_placeholder_env_knobs_are_configurable(self):
         env = {
             "GUEST_BOT_TOKEN": "token",
@@ -808,6 +829,65 @@ class GuestQueueTests(unittest.TestCase):
         self.assertNotIn("api.telegram.org/file", combined)
         self.assertTrue(downloaded_urls)
         self.assertIn("secret-token", downloaded_urls[0])
+
+    def test_reply_photo_is_downloaded_to_the_host_visible_media_bridge(self):
+        gw = MediaGateway()
+        gw.cfg.media_host_dir = gw.tmp_path / "host-media"
+
+        message = {
+            "from": {"id": 123456789},
+            "chat": {"type": "supergroup"},
+            "text": "оцени фотографию",
+            "reply_to_message": {
+                "photo": [
+                    {"file_id": "reply-small", "width": 90, "height": 90, "file_size": 3},
+                    {"file_id": "reply-large", "width": 900, "height": 900, "file_size": 4},
+                ],
+            },
+        }
+
+        with patch("guest_gateway.http_bytes", return_value=b"jpeg"):
+            context = gw.media_context(message)
+
+        reply_media = context["reply_to_message"]["media"]
+        self.assertEqual(len(reply_media), 1)
+        self.assertEqual(reply_media[0]["kind"], "photo")
+        self.assertEqual(reply_media[0]["download"], "ok")
+        self.assertIn("reply-large", reply_media[0]["local_path"])
+        self.assertTrue(reply_media[0]["local_path"].startswith(str(gw.cfg.media_host_dir)))
+        self.assertTrue(reply_media[0]["sandbox_path"].startswith(str(gw.cfg.media_cache_dir)))
+
+    def test_media_diagnostic_log_excludes_file_ids_paths_and_chat_text(self):
+        gw = MediaGateway()
+        output = io.StringIO()
+        context = {
+            "reply_to_message": {
+                "text": "private caption",
+                "media": [
+                    {
+                        "kind": "photo",
+                        "download": "ok",
+                        "file_size": 42,
+                        "file_id": "private-file-id",
+                        "local_path": "/private/host/path.jpg",
+                        "sandbox_path": "/sandbox/inbound/path.jpg",
+                    }
+                ],
+            }
+        }
+
+        with redirect_stdout(output):
+            gw._log_media_context(context)
+
+        logged = output.getvalue()
+        self.assertIn('"source": "reply_to_message"', logged)
+        self.assertIn('"kind": "photo"', logged)
+        self.assertIn('"download": "ok"', logged)
+        self.assertIn('"bytes": 42', logged)
+        self.assertNotIn("private caption", logged)
+        self.assertNotIn("private-file-id", logged)
+        self.assertNotIn("/private/host/path.jpg", logged)
+        self.assertNotIn("/sandbox/inbound/path.jpg", logged)
 
     def test_media_context_respects_size_cap_and_keeps_metadata(self):
         gw = MediaGateway()

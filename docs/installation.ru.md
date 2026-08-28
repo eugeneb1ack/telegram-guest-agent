@@ -132,7 +132,7 @@ docker compose logs -f telegram-guest-agent
 
 Входящие Telegram-файлы скачиваются в `GUEST_MEDIA_CACHE_DIR` и ограничиваются `GUEST_MEDIA_MAX_BYTES`. В Docker они остаются в `/sandbox/inbound`.
 
-В Docker Compose host-side harness должен записывать публичный output-файл в `<репозиторий>/runtime/guest-media-cache`. Gateway видит этот mount как `/sandbox/inbound`; явно укажите путь хоста, чтобы входящие медиа и сгенерированный output проходили через один безопасный bridge:
+В Docker Compose host-side harness должен записывать публичный output-файл в `<репозиторий>/runtime/guest-media-cache`. Gateway видит этот mount как `/sandbox/inbound`. `run-docker.sh` при каждом запуске вычисляет абсолютный host-путь из активного checkout, поэтому после переноса или замены deployment не останется устаревший media bridge. Указывайте путь вручную только при запуске через чистый `docker compose` или напрямую через Python:
 
 ```dotenv
 GUEST_OWNER_MEDIA_ENABLED=1

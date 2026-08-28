@@ -10,6 +10,10 @@ services:
     environment:
       # Untrusted Telegram downloads remain inside the container sandbox.
       GUEST_MEDIA_CACHE_DIR: /sandbox/inbound
+      # Keep the path advertised to a host-side harness identical to the host
+      # side of the bind mount below. run-docker.sh supplies an absolute path
+      # derived from the active checkout, overriding stale values in .env.
+      GUEST_MEDIA_HOST_DIR: "${GUEST_MEDIA_HOST_DIR:-${PWD}/runtime/guest-media-cache}"
       # State must live in a writable directory because it is atomically replaced.
       GUEST_STATE_PATH: /app/runtime/state.json
       # A long tool-using run is allowed, but cannot leave a placeholder forever.
@@ -23,7 +27,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./runtime:/app/runtime
-      - ./runtime/guest-media-cache:/sandbox/inbound
+      # Use the same source advertised through GUEST_MEDIA_HOST_DIR. This
+      # preserves the bridge invariant even for a raw Compose launch.
+      - ${GUEST_MEDIA_HOST_DIR:-./runtime/guest-media-cache}:/sandbox/inbound
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
