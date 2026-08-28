@@ -9,6 +9,7 @@
 - Git и Bash для готовых installation-скриптов.
 - Docker Engine с Docker Compose v2 и плагином Docker Buildx (рекомендуемый production-путь) либо Python 3.12 для прямого запуска.
 - Для автоматической настройки Hermes: рабочий CLI `hermes`, `curl` и `openssl`.
+- Для нативных саммари Telegram-голосовых: отдельно установленный и авторизованный Telethon userbot, его сериализованный runner и включённый skill `userbot` в выбранном Hermes-профиле.
 - Для другого harness: URL endpoint, название модели и bearer-ключ.
 
 Создайте отдельного Telegram-бота. Тот же токен не должен одновременно опрашивать другой long-polling процесс.
@@ -99,6 +100,53 @@ Bootstrap делает только ограниченный и проверяе
 
 Добавляйте `--rotate-key` только при намеренной замене API-ключа. Используйте
 `--no-start`, если Hermes устанавливает и запускает другой supervisor.
+
+### Нативные саммари голосовых через Userbot
+
+Репозиторий не содержит и не устанавливает Telegram API credentials, account
+env или Telethon session. Если гостевой агент должен суммировать voice, audio
+или video note через нативную транскрибацию Telegram, сначала подготовьте
+отдельный userbot-runtime:
+
+- аккаунт userbot авторизован, а его session в каждый момент принадлежит
+  только одному сериализованному runner;
+- в runtime есть `scripts/userbotrun.py`,
+  `modules/transcribe_audio_native.py` и
+  `modules/summarize_chat_native.py`;
+- в исходном Hermes-профиле включён skill `userbot`, который направляет точные
+  message IDs в эти модули;
+- terminal policy Hermes видит runtime, но session и credentials не копируются
+  в этот репозиторий и не монтируются в Telegram-контейнер.
+
+Проверьте discovery локально, не запуская второй Telegram session owner:
+
+```bash
+cd /путь/к/telethon-userbot
+venv/bin/python scripts/userbot_module_registry.py \
+  --query 'transcribe one exact Telegram voice message using native Telegram transcription' \
+  --json
+hermes -p telegram-guest-agent skills list
+```
+
+Registry должен выбрать `transcribe_audio_native.py`, а в списке Hermes должен
+быть `userbot`. Для одного voice в reply skill запускает exact-ID модуль через
+`userbotrun.py`; для саммари целого диалога —
+`summarize_chat_native.py --do-summary`. Суммировать можно только результат с
+`complete=true` и совпавшими chat/message/sender provenance.
+
+Безопасный default sidecar:
+
+```dotenv
+GUEST_TELEGRAM_NATIVE_STT_REQUIRED=1
+```
+
+В этом режиме gateway помещает исходные `chat_id`, `message_id` и `sender_id`
+прямо в media-секцию harness payload и добавляет обязательную system
+instruction. При наличии этих IDs запрещено незаметно подменять нативную
+Telegram-транскрибацию через Whisper, Ollama, ffmpeg или другую локальную/
+внешнюю STT. Если нативный результат недоступен или неполон, агент обязан
+сообщить ограничение и остановиться. Ставьте `0` только для generic harness,
+который намеренно использует и документирует другую STT-политику.
 
 ### CloakBrowser, VPN и fake-IP DNS
 

@@ -918,6 +918,49 @@ class GuestQueueTests(unittest.TestCase):
         self.assertEqual([m["reason"] for m in media], ["file_size over cap", "file_size over cap"])
         fake_http_bytes.assert_not_called()
 
+    def test_reply_voice_keeps_native_telegram_transcription_provenance(self):
+        gw = MediaGateway()
+        message = {
+            "from": {"id": 123456789},
+            "chat": {"id": -100123, "type": "supergroup"},
+            "text": "суммируй голосовое",
+            "reply_to_message": {
+                "message_id": 77,
+                "from": {"id": 456789},
+                "voice": {
+                    "file_id": "voice-file",
+                    "mime_type": "audio/ogg",
+                    "duration": 12,
+                    "file_size": 4,
+                },
+            },
+        }
+
+        with patch("guest_gateway.http_bytes", return_value=b"voice"):
+            context = gw.media_context(message)
+            prompt = gw._build_hermes_prompt(message)
+            instructions = gw._hermes_instructions()
+
+        reply = context["reply_to_message"]
+        self.assertEqual(reply["chat_id"], -100123)
+        self.assertEqual(reply["message_id"], 77)
+        self.assertEqual(reply["sender_id"], 456789)
+        self.assertFalse(reply["outgoing"])
+        self.assertEqual(
+            reply["transcription_policy"],
+            "telegram_native_userbot_only",
+        )
+        self.assertEqual(reply["transcription_skill"], "userbot")
+        self.assertTrue(reply["transcription_requires_complete"])
+        self.assertIn("Mandatory Telegram speech policy", instructions)
+        self.assertIn(
+            "Never use the local download with Whisper, Ollama, ffmpeg",
+            instructions,
+        )
+        self.assertIn('"chat_id": -100123', prompt)
+        self.assertIn('"message_id": 77', prompt)
+        self.assertIn('"sender_id": 456789', prompt)
+
     def test_media_context_downloads_actual_video_not_only_thumbnail(self):
         gw = MediaGateway()
         message = {
@@ -1120,12 +1163,14 @@ class GuestQueueTests(unittest.TestCase):
             "HERMES_API_KEY": "key",
             "GUEST_HARNESS_MEDIA_HOST_DIR": "/host/hermes/cache/images",
             "GUEST_HARNESS_MEDIA_CACHE_DIR": "/sandbox/harness-output",
+            "GUEST_TELEGRAM_NATIVE_STT_REQUIRED": "0",
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = Config.from_env()
 
         self.assertEqual(cfg.harness_media_host_dir, Path("/host/hermes/cache/images"))
         self.assertEqual(cfg.harness_media_cache_dir, Path("/sandbox/harness-output"))
+        self.assertFalse(cfg.telegram_native_stt_required)
 
     def test_answer_guest_refuses_local_file_outside_allowed_dirs(self):
         gw = MediaGateway()

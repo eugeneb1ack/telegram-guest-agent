@@ -760,6 +760,7 @@ class Config:
     media_host_dir: Path | None = None
     harness_media_cache_dir: Path | None = None
     harness_media_host_dir: Path | None = None
+    telegram_native_stt_required: bool = True
     media_max_bytes: int = 10_000_000
     reactions_enabled: bool = True
     owner_media_enabled: bool = True
@@ -822,6 +823,9 @@ class Config:
         harness_media_cache_dir = Path(harness_media_cache_dir_raw).expanduser() if harness_media_cache_dir_raw else None
         harness_media_host_dir_raw = os.environ.get("GUEST_HARNESS_MEDIA_HOST_DIR", "").strip()
         harness_media_host_dir = Path(harness_media_host_dir_raw).expanduser() if harness_media_host_dir_raw else None
+        telegram_native_stt_required = os.environ.get(
+            "GUEST_TELEGRAM_NATIVE_STT_REQUIRED", "1"
+        ).lower() not in {"0", "false", "no", "off"}
         media_max_bytes = int(os.environ.get("GUEST_MEDIA_MAX_BYTES", "10000000"))
         reactions_enabled = os.environ.get("GUEST_REACTIONS_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
         placeholder_enabled = os.environ.get("GUEST_PLACEHOLDER_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
@@ -864,6 +868,7 @@ class Config:
             media_host_dir=media_host_dir,
             harness_media_cache_dir=harness_media_cache_dir,
             harness_media_host_dir=harness_media_host_dir,
+            telegram_native_stt_required=telegram_native_stt_required,
             media_max_bytes=max(0, media_max_bytes),
             reactions_enabled=reactions_enabled,
             placeholder_enabled=placeholder_enabled,
@@ -1209,13 +1214,32 @@ class GuestGateway:
         walk((rich_message or {}).get("blocks") or [])
         return found
 
-    def _media_context_for_message(self, message: dict[str, Any], label: str) -> dict[str, Any]:
+    def _media_context_for_message(
+        self,
+        message: dict[str, Any],
+        label: str,
+        fallback_chat_id: Any = None,
+    ) -> dict[str, Any]:
+        chat_id = (message.get("chat") or {}).get("id")
+        if chat_id is None:
+            chat_id = fallback_chat_id
+        sender_id = (message.get("from") or {}).get("id")
         ctx: dict[str, Any] = {
             "label": label,
             "text": self._message_text(message),
             "message_kinds": [],
             "media": [],
         }
+        # Keep Telegram provenance next to its media. Skills that need the
+        # original MTProto message must not have to infer IDs from a local
+        # download path or join unrelated prompt sections themselves.
+        if chat_id is not None:
+            ctx["chat_id"] = chat_id
+        if message.get("message_id") is not None:
+            ctx["message_id"] = message.get("message_id")
+        if sender_id is not None:
+            ctx["sender_id"] = sender_id
+            ctx["outgoing"] = sender_id == self.cfg.owner_id
         for key in ("photo", "sticker", "video", "animation", "video_note", "voice", "audio", "document", "location", "venue", "contact", "poll"):
             if message.get(key):
                 ctx["message_kinds"].append(key)
@@ -1327,12 +1351,30 @@ class GuestGateway:
                         )
                     )
                 ctx["media"].append({key: value for key, value in item.items() if value is not None})
+        if self.cfg.telegram_native_stt_required and any(
+            item.get("kind") in {"voice", "audio", "video_note"}
+            for item in ctx["media"]
+        ):
+            ctx["transcription_policy"] = "telegram_native_userbot_only"
+            ctx["transcription_skill"] = "userbot"
+            ctx["transcription_requires_complete"] = True
         return ctx
 
     def media_context(self, message: dict[str, Any]) -> dict[str, Any]:
-        ctx = {"message": self._media_context_for_message(message, "message")}
+        chat_id = (message.get("chat") or {}).get("id")
+        ctx = {
+            "message": self._media_context_for_message(
+                message,
+                "message",
+                fallback_chat_id=chat_id,
+            )
+        }
         if message.get("reply_to_message"):
-            ctx["reply_to_message"] = self._media_context_for_message(message["reply_to_message"], "reply")
+            ctx["reply_to_message"] = self._media_context_for_message(
+                message["reply_to_message"],
+                "reply",
+                fallback_chat_id=chat_id,
+            )
         return ctx
 
     def _log_media_context(self, context: dict[str, Any]) -> None:
@@ -1951,9 +1993,17 @@ class GuestGateway:
             return "other_user"
         return "unknown"
 
-    def _message_identity_context(self, message: dict[str, Any]) -> dict[str, Any]:
+    def _message_identity_context(
+        self,
+        message: dict[str, Any],
+        fallback_chat_id: Any = None,
+    ) -> dict[str, Any]:
+        chat_id = (message.get("chat") or {}).get("id")
+        if chat_id is None:
+            chat_id = fallback_chat_id
         ctx: dict[str, Any] = {
             "message_id": message.get("message_id"),
+            "chat_id": chat_id,
             "author_role": self._message_author_role(message),
             "author": self._user_summary(message.get("from") or {}),
             "sender_chat": message.get("sender_chat") or None,
@@ -2414,7 +2464,25 @@ class GuestGateway:
                 self.jobs.task_done()
 
     def _hermes_instructions(self) -> str:
-        return "Telegram Guest Mode sidecar context. The active harness profile owns persona, policy, and tool selection; this message supplies only Telegram invocation data and transport constraints."
+        instructions = (
+            "Telegram Guest Mode sidecar context. The active harness profile "
+            "owns persona, policy, and tool selection; this message supplies "
+            "only Telegram invocation data and transport constraints."
+        )
+        if self.cfg.telegram_native_stt_required:
+            instructions += (
+                " Mandatory Telegram speech policy: when the owner asks to "
+                "transcribe, summarize, translate, or assess speech from a "
+                "Telegram voice, audio, or video-note message that has "
+                "chat_id, message_id, and sender_id provenance, load the "
+                "userbot skill and use Telegram native MTProto transcription "
+                "through its canonical Telethon module. Never use the local "
+                "download with Whisper, Ollama, ffmpeg, or another external "
+                "STT fallback. Accept only a complete provenance-matched "
+                "native result; if it is unavailable or incomplete, report "
+                "that limitation instead of substituting another transcript."
+            )
+        return instructions
 
     def _build_hermes_prompt(self, message: dict[str, Any]) -> str:
         text = self._message_text(message)
@@ -2423,8 +2491,13 @@ class GuestGateway:
         reply = message.get("reply_to_message") or {}
         reply_text = self._message_text(reply)
         caller_context = self._user_summary(caller)
-        message_context = self._message_identity_context(message)
-        reply_context = self._message_identity_context(reply) if reply else None
+        chat_id = (chat or {}).get("id")
+        message_context = self._message_identity_context(message, fallback_chat_id=chat_id)
+        reply_context = (
+            self._message_identity_context(reply, fallback_chat_id=chat_id)
+            if reply
+            else None
+        )
         telegram_context = {
             "caller": caller_context,
             "owner_id": self.cfg.owner_id,

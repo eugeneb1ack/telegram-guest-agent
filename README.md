@@ -17,6 +17,7 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 - Replaces the initial placeholder with live, privacy-safe activity such as «Открываю страницу…» or «Запускаю тесты…» when Hermes reports a real tool event.
 - Persists the delivery queue before acknowledging an update, so long agent runs do not block polling and survive a sidecar restart.
 - Downloads inbound media into a sandbox, caps its size, and sanitizes local paths in every public answer.
+- Preserves the original Telegram `chat_id`, `message_id`, and `sender_id` beside voice/audio media so an installed `userbot` skill can use Telegram-native MTProto transcription instead of silently falling back to Whisper.
 - Stages explicitly allowed local output media through the owner DM before reusing the returned Telegram `file_id` in a public rich reply.
 - Uses Bot API rich message blocks when available and falls back to ordinary text if Telegram rejects the rich payload.
 
@@ -70,6 +71,24 @@ The gateway is intentionally narrow transport glue. Keep persona, tools, and pol
 
 Both modes retain up to six request/answer pairs for a valid reply session. The buffer expires with `GUEST_PENDING_ANCHOR_TTL`, is cleared when the sidecar restarts, and is never written to `state.json`. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
 
+### Telegram-native voice transcription
+
+`GUEST_TELEGRAM_NATIVE_STT_REQUIRED=1` is the safe default for Telegram voice,
+audio, and video-note speech tasks. The gateway puts the source chat, message,
+and sender IDs in the same `media_context` section as the downloaded media and
+adds a system-level routing rule: load the harness profile's `userbot` skill,
+use its canonical Telethon module and Telegram's native MTProto transcription,
+and accept only a complete provenance-matched result. Whisper, Ollama, ffmpeg,
+and external STT are not permitted as silent fallbacks. If the profile has no
+working userbot integration, the agent must report that limitation instead of
+inventing or substituting a transcript.
+
+This project does not package Telegram user sessions or Telethon credentials.
+Install the userbot runtime and skill separately, then clone that configured
+Hermes profile with `setup-hermes-profile.sh --clone-from ...`. Generic
+harnesses that deliberately own a different transcription policy can set
+`GUEST_TELEGRAM_NATIVE_STT_REQUIRED=0` explicitly.
+
 ## Live activity status
 
 In Hermes Runs mode, the gateway consumes the structured SSE lifecycle stream and updates the existing Telegram placeholder only when the harness reports actual activity. Each supported action has distinct start, working, completion, and failure phases. Fixed public categories cover planning, skills, tool discovery, browser navigation and interaction, internet search and extraction, command-line work, scripts, tests, code checks, builds, repository work, file search and reading, code changes, documents, media, data, context, task plans, communication, automation, external tools, and subagents.
@@ -87,6 +106,7 @@ Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GU
 - The Docker runner derives the host side of the media bridge from the active checkout on every start; Compose uses that exact path for both the bind mount and the path given to the harness, preventing stale media paths after a deployment move.
 - Local files may be staged only from `GUEST_OWNER_MEDIA_ALLOWED_DIRS`. Everything else is rejected. Public responses redact `MEDIA:`, `file://`, Windows paths, and sensitive POSIX paths.
 - Generated harness files are accepted only from the explicitly configured `GUEST_HARNESS_MEDIA_DIR`. Compose mounts that one directory read-only at `/sandbox/harness-output`; it does not mount the Hermes profile, credentials, skills, or history. Accepted files are sent to the owner DM first, then their Telegram `file_id` is embedded in the guest rich article.
+- Telegram-native transcription receives only source provenance through the prompt. Telethon credentials, account environment files, and session files stay in the separate userbot runtime and must never be mounted into this container or committed here.
 - Rotate credentials if they ever appear in a terminal capture, issue, commit, or public message.
 
 ## Development

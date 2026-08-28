@@ -9,6 +9,7 @@ This guide installs **Telegram Guest Agent** as a separate Telegram Guest Mode s
 - Git and Bash for the supplied installation scripts.
 - Docker Engine with Docker Compose v2 and the Docker Buildx plugin (recommended production path), or Python 3.12 for direct execution.
 - For the automated Hermes path: a working `hermes` CLI, `curl`, and `openssl`.
+- For Telegram-native voice summaries: a separately installed and authorized Telethon userbot runtime, its serialized runner, and an enabled `userbot` skill in the selected Hermes profile.
 - For another harness: an endpoint, model name, and bearer key.
 
 Use a dedicated bot token. Do not point another long-polling process at this token.
@@ -96,6 +97,54 @@ To configure an existing profile deliberately:
 
 Add `--rotate-key` only when you intend to replace the profile's current API
 key. Add `--no-start` when a separate supervisor will install/start Hermes.
+
+### Telegram-native voice summaries through Userbot
+
+The repository does not contain or install Telegram API credentials, account
+environment files, or Telethon sessions. If the guest agent must summarize a
+Telegram voice, audio file, or video note through Telegram's native
+transcription, prepare the userbot integration before cloning the Hermes
+profile:
+
+- the userbot runtime has an authorized account and one serialized session
+  owner;
+- `scripts/userbotrun.py`, `modules/transcribe_audio_native.py`, and
+  `modules/summarize_chat_native.py` exist in that runtime;
+- the Hermes source profile has an enabled `userbot` skill that routes exact
+  message IDs through those modules;
+- the Hermes terminal policy can reach the runtime without copying its session
+  or credentials into this repository or container.
+
+Verify operation discovery locally without opening a second Telegram session:
+
+```bash
+cd /path/to/telethon-userbot
+venv/bin/python scripts/userbot_module_registry.py \
+  --query 'transcribe one exact Telegram voice message using native Telegram transcription' \
+  --json
+hermes -p telegram-guest-agent skills list
+```
+
+The registry should select `transcribe_audio_native.py`, and the Hermes list
+should include `userbot`. For a single replied voice, the skill should invoke
+the exact-ID transcription module through `userbotrun.py`. For a whole-dialog
+summary, it should use `summarize_chat_native.py --do-summary`. Only a result
+with `complete=true` and matching chat/message/sender provenance may be
+summarized.
+
+The sidecar default is:
+
+```dotenv
+GUEST_TELEGRAM_NATIVE_STT_REQUIRED=1
+```
+
+With this setting, the gateway copies the original `chat_id`, `message_id`,
+and `sender_id` into the media section sent to the harness and adds a mandatory
+system instruction. Whisper, Ollama, ffmpeg, and other external/local STT
+routes are forbidden for a Telegram speech-summary task when those IDs are
+available. If native transcription is unavailable or incomplete, the agent
+must report the limitation and stop. Set the value to `0` only when a generic
+harness deliberately owns and documents another transcription policy.
 
 ### CloakBrowser, VPNs, and fake-IP DNS
 
