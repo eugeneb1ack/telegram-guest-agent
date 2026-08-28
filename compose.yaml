@@ -14,6 +14,12 @@ services:
       # side of the bind mount below. run-docker.sh supplies an absolute path
       # derived from the active checkout, overriding stale values in .env.
       GUEST_MEDIA_HOST_DIR: "${GUEST_MEDIA_HOST_DIR:-${PWD}/runtime/guest-media-cache}"
+      # A harness may generate media in its own cache rather than in the
+      # inbound bridge. Expose only that configured output directory through a
+      # separate read-only mount; never mount an entire profile or its secrets.
+      GUEST_HARNESS_MEDIA_HOST_DIR: "${GUEST_HARNESS_MEDIA_DIR:-${GUEST_MEDIA_HOST_DIR:-${PWD}/runtime/guest-media-cache}}"
+      GUEST_HARNESS_MEDIA_CACHE_DIR: /sandbox/harness-output
+      GUEST_OWNER_MEDIA_ALLOWED_DIRS: /sandbox/inbound:/sandbox/harness-output
       # State must live in a writable directory because it is atomically replaced.
       GUEST_STATE_PATH: /app/runtime/state.json
       # A long tool-using run is allowed, but cannot leave a placeholder forever.
@@ -30,6 +36,9 @@ services:
       # Use the same source advertised through GUEST_MEDIA_HOST_DIR. This
       # preserves the bridge invariant even for a raw Compose launch.
       - ${GUEST_MEDIA_HOST_DIR:-./runtime/guest-media-cache}:/sandbox/inbound
+      # Generated output is read-only. If no separate harness directory is
+      # configured, reuse the media bridge so a generic harness still starts.
+      - ${GUEST_HARNESS_MEDIA_DIR:-${GUEST_MEDIA_HOST_DIR:-./runtime/guest-media-cache}}:/sandbox/harness-output:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

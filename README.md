@@ -38,11 +38,20 @@ Hermes Runs is the preferred transport: the harness receives a stable `session_i
 git clone https://github.com/eugeneb1ack/telegram-guest-agent.git
 cd telegram-guest-agent
 ./init-env.sh
-$EDITOR .env
+./setup-hermes-profile.sh --clone-from default
+$EDITOR .env  # add only the Telegram token, owner ID, and bot username
 ./run-docker.sh
 ```
 
-Set at least `GUEST_BOT_TOKEN`, `GUEST_OWNER_ID`, `HERMES_API_URL`, `HERMES_API_KEY`, and `HERMES_MODEL` in `.env`. The complete setup for Hermes or another harness is in the [English installation guide](docs/installation.en.md) and [Russian installation guide](docs/installation.ru.md).
+The Hermes bootstrap creates a dedicated profile, gives its API server the full
+`hermes-cli` capability bundle, generates a separate bearer key, connects the
+sidecar, and exposes only the profile's generated-image cache through a
+read-only media mount. It never writes credentials, persona, or skills into
+the repository. Omit `--clone-from default` for a clean profile with bundled
+skills, or clone from another local profile to preserve its custom
+skills/persona/provider authentication. The complete setup for Hermes or
+another harness is in the [English installation guide](docs/installation.en.md)
+and [Russian installation guide](docs/installation.ru.md).
 
 Run a connectivity check before enabling polling:
 
@@ -77,6 +86,7 @@ Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GU
 - Inbound media is untrusted and lands in `/sandbox/inbound` in Docker. The container is non-root, read-only, drops Linux capabilities, uses `no-new-privileges`, and has a constrained temporary filesystem.
 - The Docker runner derives the host side of the media bridge from the active checkout on every start; Compose uses that exact path for both the bind mount and the path given to the harness, preventing stale media paths after a deployment move.
 - Local files may be staged only from `GUEST_OWNER_MEDIA_ALLOWED_DIRS`. Everything else is rejected. Public responses redact `MEDIA:`, `file://`, Windows paths, and sensitive POSIX paths.
+- Generated harness files are accepted only from the explicitly configured `GUEST_HARNESS_MEDIA_DIR`. Compose mounts that one directory read-only at `/sandbox/harness-output`; it does not mount the Hermes profile, credentials, skills, or history. Accepted files are sent to the owner DM first, then their Telegram `file_id` is embedded in the guest rich article.
 - Rotate credentials if they ever appear in a terminal capture, issue, commit, or public message.
 
 ## Development
@@ -86,7 +96,7 @@ The project has no third-party Python runtime dependency.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -q
 python3 -m py_compile guest_gateway.py rich_renderer.py
-bash -n init-env.sh run-docker.sh install-launchagent.sh run.sh
+bash -n init-env.sh setup-hermes-profile.sh run-docker.sh install-launchagent.sh run.sh
 ```
 
 The test suite covers queue durability, context routing, Runs payloads and live activity privacy, Chat Completions reply history, rich-message fallback, media constraints, and path sanitization.
@@ -98,6 +108,7 @@ The test suite covers queue durability, context routing, Runs payloads and live 
 | `guest_gateway.py` | Telegram polling, durable queue, context resolution, harness clients, media and delivery safeguards. |
 | `rich_renderer.py` | Conservative Markdown/Rich HTML to Telegram rich-block renderer. |
 | `compose.yaml` / `Dockerfile` | Hardened container deployment. |
+| `setup-hermes-profile.sh` | Creates or connects a dedicated full-tool Hermes profile without committing secrets. |
 | `.env.example` | Safe configuration template with placeholders only. |
 | `docs/` | English and Russian installation guides. |
 | `assets/` | README artwork only; never runtime or user media. |

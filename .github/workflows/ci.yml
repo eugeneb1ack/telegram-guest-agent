@@ -20,4 +20,4 @@ jobs:
       - name: Test
         run: PYTHONDONTWRITEBYTECODE=1 python -m unittest -q
       - name: Check shell scripts
-        run: bash -n init-env.sh run-docker.sh install-launchagent.sh run.sh
+        run: bash -n init-env.sh setup-hermes-profile.sh run-docker.sh install-launchagent.sh run.sh

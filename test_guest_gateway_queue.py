@@ -1068,6 +1068,41 @@ class GuestQueueTests(unittest.TestCase):
         upload = [p for method, p in gw.calls if method == "sendPhoto"][0]
         self.assertEqual(upload["path"], str(local))
 
+    def test_answer_guest_maps_read_only_harness_output_and_embeds_rich_photo(self):
+        gw = MediaGateway()
+        host_output = gw.tmp_path / "hermes-profile" / "cache" / "images"
+        container_output = gw.tmp_path / "harness-output"
+        generated = container_output / "generated.png"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"png")
+        gw.cfg.harness_media_host_dir = host_output
+        gw.cfg.harness_media_cache_dir = container_output
+        gw.cfg.owner_media_allowed_dirs = (gw.cfg.media_cache_dir, container_output)
+
+        gw.answer_guest("q1", f"Готово.\n\nMEDIA:{host_output / generated.name}")
+
+        upload = [p for method, p in gw.calls if method == "sendPhoto"][0]
+        self.assertEqual(upload["fields"]["chat_id"], "123456789")
+        self.assertEqual(upload["path"], str(generated))
+        payload = [p for method, p in gw.calls if method == "answerGuestQuery"][0]
+        rich = payload["result"]["input_message_content"]["rich_message"]
+        self.assertEqual(rich["blocks"][-1]["type"], "photo")
+        self.assertEqual(rich["blocks"][-1]["photo"]["media"], "staged-photo")
+        self.assertNotIn(str(host_output), rich_or_text(payload["result"]["input_message_content"]))
+
+    def test_harness_output_bridge_does_not_map_sibling_profile_files(self):
+        gw = MediaGateway()
+        host_output = gw.tmp_path / "hermes-profile" / "cache" / "images"
+        container_output = gw.tmp_path / "harness-output"
+        gw.cfg.harness_media_host_dir = host_output
+        gw.cfg.harness_media_cache_dir = container_output
+        gw.cfg.owner_media_allowed_dirs = (container_output,)
+        sibling = host_output.parent / "private.env"
+
+        gw.answer_guest("q1", f"MEDIA:{sibling}")
+
+        self.assertEqual([method for method, _payload in gw.calls if method == "sendPhoto"], [])
+
     def test_answer_guest_does_not_map_host_path_outside_configured_media_directory(self):
         gw = MediaGateway()
         gw.cfg.media_host_dir = gw.tmp_path / "host-harness-media"
@@ -1077,6 +1112,20 @@ class GuestQueueTests(unittest.TestCase):
         gw.answer_guest("q1", f"MEDIA:{outside}")
 
         self.assertEqual([method for method, _payload in gw.calls if method == "sendPhoto"], [])
+
+    def test_config_reads_harness_media_bridge_paths(self):
+        env = {
+            "GUEST_BOT_TOKEN": "token",
+            "GUEST_OWNER_ID": "123456789",
+            "HERMES_API_KEY": "key",
+            "GUEST_HARNESS_MEDIA_HOST_DIR": "/host/hermes/cache/images",
+            "GUEST_HARNESS_MEDIA_CACHE_DIR": "/sandbox/harness-output",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = Config.from_env()
+
+        self.assertEqual(cfg.harness_media_host_dir, Path("/host/hermes/cache/images"))
+        self.assertEqual(cfg.harness_media_cache_dir, Path("/sandbox/harness-output"))
 
     def test_answer_guest_refuses_local_file_outside_allowed_dirs(self):
         gw = MediaGateway()

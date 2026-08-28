@@ -8,7 +8,8 @@ This guide installs **Telegram Guest Agent** as a separate Telegram Guest Mode s
 - The numeric Telegram user ID that is allowed to use the bot.
 - Git and Bash for the supplied installation scripts.
 - Docker Engine with Docker Compose v2 and the Docker Buildx plugin (recommended production path), or Python 3.12 for direct execution.
-- A harness endpoint and bearer key.
+- For the automated Hermes path: a working `hermes` CLI, `curl`, and `openssl`.
+- For another harness: an endpoint, model name, and bearer key.
 
 Use a dedicated bot token. Do not point another long-polling process at this token.
 
@@ -19,11 +20,14 @@ git --version
 docker version
 docker compose version
 docker buildx version
+hermes --version
+curl --version
+openssl version
 ```
 
 The Docker path installs no Python packages on the host: the runtime uses the standard library and is built into the supplied image.
 
-## 2. Configure the agent
+## 2. Clone and create the local environment
 
 ```bash
 git clone https://github.com/eugeneb1ack/telegram-guest-agent.git
@@ -31,7 +35,97 @@ cd telegram-guest-agent
 ./init-env.sh
 ```
 
-Edit `.env` and set the required values:
+`.env` is owner-readable and ignored by Git. Never paste its contents into an
+issue, commit, terminal recording, or support message.
+
+## 3. Create a dedicated Hermes harness profile
+
+The repository can create and connect the profile instead of asking you to
+assemble its API configuration by hand.
+
+To preserve the same persona, provider authentication, installed custom
+skills, plugins, and policies as your normal Hermes profile, clone it locally:
+
+```bash
+./setup-hermes-profile.sh \
+  --profile telegram-guest-agent \
+  --clone-from default \
+  --port 8644
+```
+
+The clone stays under the local Hermes home. Nothing from it is copied into
+this repository or Git. The script replaces the cloned API-server key with a
+new profile-specific key.
+
+For a clean profile with only Hermes' bundled skills and default persona:
+
+```bash
+./setup-hermes-profile.sh --profile telegram-guest-agent --port 8644
+```
+
+Finish provider authentication in that profile if the clean profile does not
+already have a working model. You can also select a model explicitly:
+
+```bash
+./setup-hermes-profile.sh \
+  --profile telegram-guest-agent \
+  --model your-model-name \
+  --port 8644
+```
+
+The bootstrap performs the following scoped changes:
+
+- creates a dedicated Hermes profile, or refuses to modify an existing one
+  unless `--reuse` is supplied;
+- enables its authenticated Runs/Chat Completions API on the selected port;
+- gives `api_server` the complete `hermes-cli` tool bundle, so the profile's
+  skills, browser, terminal, web, files, memory, plugins, and available MCP
+  tools are resolved by Hermes normally;
+- generates a strong API key without printing it and writes the matching
+  connection values into this repository's ignored `.env`;
+- exposes only `<profile>/cache/images` to the Telegram container through a
+  read-only mount, allowing generated images to be sent to the owner DM and
+  embedded by Telegram `file_id` in the rich guest article;
+- installs and starts only that profile's Hermes gateway.
+
+To configure an existing profile deliberately:
+
+```bash
+./setup-hermes-profile.sh --profile telegram-guest-agent --reuse
+```
+
+Add `--rotate-key` only when you intend to replace the profile's current API
+key. Add `--no-start` when a separate supervisor will install/start Hermes.
+
+### CloakBrowser, VPNs, and fake-IP DNS
+
+An existing Chrome or CloakBrowser CDP endpoint can be attached explicitly:
+
+```bash
+./setup-hermes-profile.sh \
+  --profile telegram-guest-agent \
+  --clone-from default \
+  --cdp-url http://127.0.0.1:9242 \
+  --allow-private-urls
+```
+
+Use `--allow-private-urls` only when your trusted VPN/proxy resolves public
+domains into private or benchmark ranges such as `198.18.0.0/15`. Without the
+flag, Hermes correctly fails closed and may reject those public domains as
+internal addresses. The flag applies only to the dedicated profile; Hermes
+continues to hard-block cloud metadata/link-local credential endpoints. It
+also permits other private-network browsing from that profile, so do not
+enable it on an untrusted or publicly callable harness.
+
+The API server binds to `0.0.0.0` so the Docker sidecar can reach it through
+`host.docker.internal`. Keep the port firewalled to trusted local networks and
+never expose it publicly even though bearer authentication is required.
+
+## 4. Configure Telegram
+
+After the Hermes bootstrap, edit `.env` and set the Telegram values. The
+Hermes URL, key, model, Runs mode, and generated-media directory are already
+filled in:
 
 ```dotenv
 GUEST_BOT_TOKEN=123456:replace-with-your-token
@@ -52,7 +146,7 @@ GUEST_PROGRESS_HEARTBEAT_INTERVAL=4.0
 
 For Docker Desktop, `host.docker.internal` reaches a harness running on the host. The supplied Compose configuration adds the same hostname on modern Linux Docker. If your harness is another service in the same Compose network, use its service hostname and port instead.
 
-## 3. Choose a harness mode
+## 5. Choose a harness mode
 
 ### Hermes Runs (recommended)
 
@@ -72,7 +166,10 @@ When the optional SSE endpoint is available, the gateway replaces «Думаю�
 
 The gateway never forwards the raw tool name, arguments, event preview, command, URL, file name, local path, partial model output, or model reasoning. `GUEST_PROGRESS_MIN_INTERVAL` limits Telegram edits to one per second by default and is bounded to `0.5–10` seconds. Set `GUEST_PROGRESS_ENABLED=0` to keep the static placeholder. If SSE is unavailable, Run polling and final delivery still work normally.
 
-For Hermes, point `HERMES_API_URL` and `HERMES_API_KEY` to the API of the dedicated profile you want the guest agent to use. Persona, tools, and policy stay in that profile; this sidecar only carries Telegram transport context.
+For Hermes, prefer `setup-hermes-profile.sh` so the endpoint, full tool bundle,
+API key, and generated-media bridge remain consistent. Persona, skills, tools,
+and policy stay in that profile; this sidecar only carries Telegram transport
+context.
 
 ### Generic OpenAI-compatible Chat Completions
 
@@ -92,7 +189,14 @@ In both modes, the gateway keeps the last six prompt/answer turns in memory for 
 
 Chat Completions has no standard tool-lifecycle stream. In this mode the gateway keeps the static placeholder instead of showing guessed activity.
 
-## 4. Start and verify
+For a non-Hermes harness, skip `setup-hermes-profile.sh` and set
+`HERMES_API_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, and `HERMES_USE_RUNS`
+manually. If it returns local generated files, set `GUEST_HARNESS_MEDIA_DIR`
+to one dedicated output directory. Compose mounts only that directory
+read-only. The harness must emit `MEDIA:/absolute/path/to/file` or a Markdown
+image using that path; all other local paths remain redacted.
+
+## 6. Start and verify
 
 Run the check first:
 
@@ -120,7 +224,21 @@ The container restarts unless stopped. Follow its output with:
 docker compose logs -f telegram-guest-agent
 ```
 
-## 5. Test session semantics
+For Hermes, also confirm the dedicated profile before enabling polling:
+
+```bash
+hermes profile show telegram-guest-agent
+hermes -p telegram-guest-agent gateway status
+hermes -p telegram-guest-agent config get platform_toolsets.api_server
+```
+
+The last command should include `hermes-cli`. A real end-to-end test should
+then ask the guest agent to list/load one installed skill and browse a harmless
+public page. If generated-media support matters, ask it to generate one small
+image and verify both deliveries: the original file in the owner DM and the
+image block in the guest rich article.
+
+## 7. Test session semantics
 
 1. Invoke the guest bot with an explicit `@your_guest_bot_username` mention or command. This starts a fresh session.
 2. Reply to the resulting guest answer and invoke the bot again. The reply is eligible to continue the short-lived session.
@@ -132,15 +250,28 @@ If a Telegram Guest Mode client delivers a plain reply separately, the gateway t
 
 Inbound Telegram files are downloaded under `GUEST_MEDIA_CACHE_DIR` and capped by `GUEST_MEDIA_MAX_BYTES`. Docker overrides the container path to `/sandbox/inbound`.
 
-For Docker Compose, a host-side harness must write any public output file under `<repository>/runtime/guest-media-cache`. The gateway sees that mount as `/sandbox/inbound`. `run-docker.sh` derives the absolute host path from the active checkout on every start, so moving or replacing the deployment cannot leave a stale media bridge. Set the path explicitly only when starting with raw `docker compose` or direct Python:
+Inbound and generated media use separate bridges. Inbound Telegram files stay
+in `<repository>/runtime/guest-media-cache` and are writable only where the
+download path needs it. A harness-generated output directory is mounted
+read-only at `/sandbox/harness-output`. The Hermes bootstrap sets it to the
+dedicated profile's `cache/images`; a generic harness can set it manually:
 
 ```dotenv
 GUEST_OWNER_MEDIA_ENABLED=1
 GUEST_OWNER_MEDIA_ALLOWED_DIRS=/sandbox/inbound
 GUEST_MEDIA_HOST_DIR=/absolute/path/to/telegram-guest-agent/runtime/guest-media-cache
+GUEST_HARNESS_MEDIA_DIR=/absolute/path/to/the/harness/output-directory
 ```
 
-When the harness returns a path below `GUEST_MEDIA_HOST_DIR`, the gateway maps it back into `/sandbox/inbound`, verifies it is an allowed regular file, uploads it to the owner DM first, then reuses the returned Telegram `file_id` in the public reply where Telegram supports that media type. Paths outside the allowlist are refused, and local paths are redacted from public output. For direct Python execution, set both paths to an explicitly allowlisted local directory instead.
+When the harness returns a path below either configured host root, the gateway
+maps it to the corresponding container mount, verifies that it is an allowed
+regular file within the size limit, uploads it to the owner DM first, then
+reuses the Telegram `file_id` in the public rich reply. Paths outside those
+roots are refused and redacted. The generated-output mount does not expose the
+profile's `.env`, persona, skills, memory, or history. For direct Python
+execution, set `GUEST_HARNESS_MEDIA_HOST_DIR`,
+`GUEST_HARNESS_MEDIA_CACHE_DIR`, and `GUEST_OWNER_MEDIA_ALLOWED_DIRS`
+explicitly because Compose normally supplies the container-side values.
 
 ## Direct Python execution (optional)
 

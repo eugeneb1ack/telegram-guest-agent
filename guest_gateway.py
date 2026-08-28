@@ -758,6 +758,8 @@ class Config:
     media_enabled: bool = True
     media_cache_dir: Path = DEFAULT_MEDIA_CACHE
     media_host_dir: Path | None = None
+    harness_media_cache_dir: Path | None = None
+    harness_media_host_dir: Path | None = None
     media_max_bytes: int = 10_000_000
     reactions_enabled: bool = True
     owner_media_enabled: bool = True
@@ -816,6 +818,10 @@ class Config:
         media_cache_dir = Path(os.environ.get("GUEST_MEDIA_CACHE_DIR", str(DEFAULT_MEDIA_CACHE))).expanduser()
         media_host_dir_raw = os.environ.get("GUEST_MEDIA_HOST_DIR") or os.environ.get("GUEST_MEDIA_HERMES_DIR") or ""
         media_host_dir = Path(media_host_dir_raw).expanduser() if media_host_dir_raw.strip() else None
+        harness_media_cache_dir_raw = os.environ.get("GUEST_HARNESS_MEDIA_CACHE_DIR", "").strip()
+        harness_media_cache_dir = Path(harness_media_cache_dir_raw).expanduser() if harness_media_cache_dir_raw else None
+        harness_media_host_dir_raw = os.environ.get("GUEST_HARNESS_MEDIA_HOST_DIR", "").strip()
+        harness_media_host_dir = Path(harness_media_host_dir_raw).expanduser() if harness_media_host_dir_raw else None
         media_max_bytes = int(os.environ.get("GUEST_MEDIA_MAX_BYTES", "10000000"))
         reactions_enabled = os.environ.get("GUEST_REACTIONS_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
         placeholder_enabled = os.environ.get("GUEST_PLACEHOLDER_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
@@ -856,6 +862,8 @@ class Config:
             media_enabled=media_enabled,
             media_cache_dir=media_cache_dir,
             media_host_dir=media_host_dir,
+            harness_media_cache_dir=harness_media_cache_dir,
+            harness_media_host_dir=harness_media_host_dir,
             media_max_bytes=max(0, media_max_bytes),
             reactions_enabled=reactions_enabled,
             placeholder_enabled=placeholder_enabled,
@@ -1433,23 +1441,30 @@ class GuestGateway:
         return False
 
     def _container_owner_media_path(self, path: Path) -> Path:
-        """Map a host-visible harness path back into the container media mount.
+        """Map a host-visible harness path back into an approved container mount.
 
         A host-side harness receives ``GUEST_MEDIA_HOST_DIR`` in its media
         context, while this gateway sees the same files below
-        ``GUEST_MEDIA_CACHE_DIR``. Only a path lexically below the configured
-        host directory is translated; the mapped path still has to pass the
-        strict allowlist and regular-file checks before it can be uploaded.
+        ``GUEST_MEDIA_CACHE_DIR``. Generated harness output may additionally be
+        exposed through the read-only ``GUEST_HARNESS_MEDIA_*`` bridge. Only a
+        path lexically below one of those configured host roots is translated;
+        the mapped path still has to pass the strict allowlist, size, and
+        regular-file checks before it can be uploaded.
         """
-        host_dir = self.cfg.media_host_dir
-        if not host_dir:
-            return path
-        try:
-            candidate = path.expanduser().resolve(strict=False)
-            relative = candidate.relative_to(host_dir.expanduser().resolve(strict=False))
-        except (OSError, RuntimeError, ValueError):
-            return path
-        return self.cfg.media_cache_dir / relative
+        bridges = (
+            (self.cfg.media_host_dir, self.cfg.media_cache_dir),
+            (self.cfg.harness_media_host_dir, self.cfg.harness_media_cache_dir),
+        )
+        candidate = path.expanduser().resolve(strict=False)
+        for host_dir, container_dir in bridges:
+            if not host_dir or not container_dir:
+                continue
+            try:
+                relative = candidate.relative_to(host_dir.expanduser().resolve(strict=False))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            return container_dir / relative
+        return path
 
     def _owner_media_method(self, path: Path) -> tuple[str, str]:
         mime = mimetypes.guess_type(path.name)[0] or ""
