@@ -2469,6 +2469,26 @@ class GuestGateway:
             "owns persona, policy, and tool selection; this message supplies "
             "only Telegram invocation data and transport constraints."
         )
+        if self.cfg.owner_media_enabled and self.cfg.harness_media_host_dir:
+            output_dir = str(
+                self.cfg.harness_media_host_dir.expanduser().resolve(strict=False)
+            )
+            instructions += (
+                " Mandatory generated-media delivery policy: completing an "
+                "image/file tool call is not completion of the Telegram task. "
+                "Before the final response, copy or export every final local "
+                "artifact intended for the chat into the exact output directory "
+                f"{json.dumps(output_dir, ensure_ascii=False)} and verify that "
+                "the resulting regular file exists there. Then include one "
+                "standalone final line in the form MEDIA:<absolute-path-inside-"
+                "that-output-directory>. Never return a MEDIA reference to a "
+                "workspace, project, temporary, or other local directory. Keep "
+                "the human-readable answer with the MEDIA line; the sidecar "
+                "will stage the file privately and embed its reusable Telegram "
+                "media into the final rich article. If the staging-ready file "
+                "cannot be created, report that limitation without exposing a "
+                "local path and do not claim the Telegram delivery is complete."
+            )
         if self.cfg.telegram_native_stt_required:
             instructions += (
                 " Mandatory Telegram speech policy: when the owner asks to "

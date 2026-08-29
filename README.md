@@ -89,6 +89,18 @@ Hermes profile with `setup-hermes-profile.sh --clone-from ...`. Generic
 harnesses that deliberately own a different transcription policy can set
 `GUEST_TELEGRAM_NATIVE_STT_REQUIRED=0` explicitly.
 
+### Generated-media completion contract
+
+For a generated image or file, a successful harness tool call is not yet a
+completed Telegram task. The Runs request names the exact host-side
+`GUEST_HARNESS_MEDIA_DIR`; the harness must copy or export the final artifact
+there, verify that the file exists, and return a standalone
+`MEDIA:/absolute/path/inside/that/directory` line with its human-readable
+answer. The sidecar stages that file in the owner's DM, reuses Telegram's
+returned `file_id`, and appends the media block to the final rich article.
+Paths from a workspace, project, or temporary directory remain blocked and
+redacted even if the underlying generation tool succeeded.
+
 ## Live activity status
 
 In Hermes Runs mode, the gateway consumes the structured SSE lifecycle stream and updates the existing Telegram placeholder only when the harness reports actual activity. Each supported action has distinct start, working, completion, and failure phases. Fixed public categories cover planning, skills, tool discovery, browser navigation and interaction, internet search and extraction, command-line work, scripts, tests, code checks, builds, repository work, file search and reading, code changes, documents, media, data, context, task plans, communication, automation, external tools, and subagents.

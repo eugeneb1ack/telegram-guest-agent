@@ -245,6 +245,14 @@ to one dedicated output directory. Compose mounts only that directory
 read-only. The harness must emit `MEDIA:/absolute/path/to/file` or a Markdown
 image using that path; all other local paths remain redacted.
 
+Tool completion alone is not delivery completion. Before returning its final
+answer, the harness must copy/export the final artifact into
+`GUEST_HARNESS_MEDIA_DIR`, verify that the regular file exists there, and place
+the `MEDIA:` reference on its own line. The sidecar first stages the file in the
+owner's DM and then embeds the returned Telegram `file_id` into the rich
+article. A file left in a project, workspace, or temporary directory is
+intentionally rejected even when the generation tool itself succeeded.
+
 ## 6. Start and verify
 
 Run the check first:

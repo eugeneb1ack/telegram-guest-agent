@@ -961,6 +961,27 @@ class GuestQueueTests(unittest.TestCase):
         self.assertIn('"message_id": 77', prompt)
         self.assertIn('"sender_id": 456789', prompt)
 
+    def test_instructions_require_generated_media_to_finish_in_harness_bridge(self):
+        gw = MediaGateway()
+        output_dir = gw.tmp_path / "hermes-profile" / "cache" / "images"
+        gw.cfg.harness_media_host_dir = output_dir
+
+        instructions = gw._hermes_instructions()
+
+        self.assertIn(
+            "completing an image/file tool call is not completion of the Telegram task",
+            instructions,
+        )
+        self.assertIn(str(output_dir), instructions)
+        self.assertIn(
+            "MEDIA:<absolute-path-inside-that-output-directory>", instructions
+        )
+        self.assertIn(
+            "embed its reusable Telegram media into the final rich article",
+            instructions,
+        )
+        self.assertIn("do not claim the Telegram delivery is complete", instructions)
+
     def test_media_context_downloads_actual_video_not_only_thumbnail(self):
         gw = MediaGateway()
         message = {
