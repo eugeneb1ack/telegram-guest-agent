@@ -1,4 +1,4 @@
-"""Conservative Markdown/HTML to Telegram Bot API 10.2 rich blocks.
+"""Conservative Markdown/HTML to Telegram Bot API 10.3 rich blocks.
 
 The renderer intentionally supports a useful, predictable subset. Unknown
 syntax stays readable as plain text instead of being sent to Telegram's parser
@@ -31,6 +31,14 @@ _MEDIA_LINE_RE = re.compile(
 _MAP_RE = re.compile(r"^\s*<tg-map\s+([^>]+)/>\s*$", re.IGNORECASE)
 _ATTR_RE = re.compile(r"([A-Za-z_][\w-]*)\s*=\s*[\"']([^\"']*)[\"']")
 _COLLAGE_OPEN_RE = re.compile(r"^\s*<tg-(collage|slideshow)>\s*$", re.IGNORECASE)
+_EXPANDABLE_BLOCKQUOTE_OPEN_RE = re.compile(
+    r"^\s*<blockquote\s+expandable\s*>\s*$",
+    re.IGNORECASE,
+)
+_EXPANDABLE_BLOCKQUOTE_INLINE_RE = re.compile(
+    r"^\s*<blockquote\s+expandable\s*>(.*?)</blockquote>\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 _INLINE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -211,6 +219,7 @@ def media_block(kind: str, source: str, caption: str = "") -> dict[str, Any]:
         "video": "video",
         "animation": "animation",
         "audio": "audio",
+        "document": "document",
         "voice_note": "voice_note",
     }[kind]
     block: dict[str, Any] = {"type": kind, field: _media_input(kind, source)}
@@ -243,6 +252,8 @@ def _special_start(lines: list[str], index: int) -> bool:
         or _DETAILS_INLINE_RE.match(line)
         or _DETAILS_OPEN_RE.match(line)
         or _COLLAGE_OPEN_RE.match(line)
+        or _EXPANDABLE_BLOCKQUOTE_INLINE_RE.match(line)
+        or _EXPANDABLE_BLOCKQUOTE_OPEN_RE.match(line)
         or _MEDIA_LINE_RE.match(line)
         or _MAP_RE.match(line)
         or line.strip() in {"---", "***", "___", "$$"}
@@ -358,6 +369,33 @@ def _render_blocks(text: str) -> list[dict[str, Any]]:
             index += 1
             continue
 
+        inline_expandable_quote = _EXPANDABLE_BLOCKQUOTE_INLINE_RE.match(line)
+        if inline_expandable_quote:
+            blocks.append(
+                {
+                    "type": "expandable_blockquote",
+                    "text": parse_inline(inline_expandable_quote.group(1).strip()),
+                }
+            )
+            index += 1
+            continue
+
+        if _EXPANDABLE_BLOCKQUOTE_OPEN_RE.match(line):
+            body: list[str] = []
+            index += 1
+            while index < len(lines) and lines[index].strip().lower() != "</blockquote>":
+                body.append(lines[index])
+                index += 1
+            if index < len(lines):
+                index += 1
+            blocks.append(
+                {
+                    "type": "expandable_blockquote",
+                    "text": parse_inline("\n".join(body).strip() or "…"),
+                }
+            )
+            continue
+
         inline_details = _DETAILS_INLINE_RE.match(line)
         if inline_details:
             summary, body = inline_details.groups()
@@ -465,7 +503,15 @@ def _render_blocks(text: str) -> list[dict[str, Any]]:
                         for cell in padded
                     ]
                 )
-            blocks.append({"type": "table", "cells": cells, "is_bordered": True, "is_striped": True})
+            blocks.append(
+                {
+                    "type": "table",
+                    "cells": cells,
+                    "is_bordered": True,
+                    "is_striped": True,
+                    "is_compact": True,
+                }
+            )
             continue
 
         if _LIST_RE.match(line):

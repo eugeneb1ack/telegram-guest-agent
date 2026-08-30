@@ -85,6 +85,23 @@ class MediaGateway(GuestGateway):
             result["document"] = {"file_id": "staged-document"}
         return {"ok": True, "result": result}
 
+
+class ProfilePhotoGateway(MediaGateway):
+    def tg(self, method, payload, timeout=60):
+        if method == "getUserProfilePhotos":
+            self.calls.append((method, payload))
+            return {
+                "ok": True,
+                "result": {
+                    "total_count": 1,
+                    "photos": [[
+                        {"file_id": "avatar-small", "width": 100, "height": 100, "file_size": 3},
+                        {"file_id": "avatar-large", "width": 800, "height": 800, "file_size": 4},
+                    ]],
+                },
+            }
+        return super().tg(method, payload, timeout)
+
 def rich_or_text(content):
     if "message_text" in content:
         return content["message_text"]
@@ -856,6 +873,170 @@ class GuestQueueTests(unittest.TestCase):
         self.assertIn("reply-large", reply_media[0]["local_path"])
         self.assertTrue(reply_media[0]["local_path"].startswith(str(gw.cfg.media_host_dir)))
         self.assertTrue(reply_media[0]["sandbox_path"].startswith(str(gw.cfg.media_cache_dir)))
+
+    def test_avatar_request_downloads_reply_authors_profile_photo_for_tools(self):
+        gw = ProfilePhotoGateway()
+        gw.cfg.media_host_dir = gw.tmp_path / "host-media"
+        message = {
+            "from": {"id": 123456789, "username": "guest_owner"},
+            "chat": {"id": -100123, "type": "supergroup", "title": "agents"},
+            "text": "скачай его аватарку и сгенерируй по ней портрет",
+            "reply_to_message": {
+                "message_id": 77,
+                "from": {
+                    "id": 456789,
+                    "username": "reference_user",
+                    "first_name": "Reference",
+                },
+                "text": "исходное сообщение",
+            },
+        }
+
+        with patch("guest_gateway.http_bytes", return_value=b"jpeg"):
+            context = gw.media_context(message)
+            prompt = gw._build_hermes_prompt(message)
+
+        targets = context["person_targets"]
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["source"], "reply_author")
+        self.assertEqual(targets[0]["resolution"], "exact_user_id")
+        photo = targets[0]["profile_photo"]
+        self.assertEqual(photo["download"], "ok")
+        self.assertIn("avatar-large", photo["local_path"])
+        self.assertTrue(photo["local_path"].startswith(str(gw.cfg.media_host_dir)))
+        profile_calls = [payload for method, payload in gw.calls if method == "getUserProfilePhotos"]
+        self.assertEqual(profile_calls, [{"user_id": 456789, "offset": 0, "limit": 1}] * 2)
+        self.assertIn('"kind": "profile_photo"', prompt)
+        self.assertIn('"media_artifact_required": true', prompt)
+        self.assertIn("actual reference image", gw._hermes_instructions())
+
+    def test_text_mention_uses_exact_embedded_user_id(self):
+        gw = ProfilePhotoGateway()
+        message = {
+            "text": "сгенерируй портрет Алисы по аватарке",
+            "entities": [
+                {
+                    "type": "text_mention",
+                    "offset": 18,
+                    "length": 5,
+                    "user": {"id": 456789, "first_name": "Алиса"},
+                }
+            ],
+        }
+
+        with patch("guest_gateway.http_bytes", return_value=b"jpeg"):
+            context = gw.media_context(message)
+
+        target = context["person_targets"][0]
+        self.assertEqual(target["source"], "text_mention")
+        self.assertEqual(target["user"]["id"], 456789)
+        self.assertEqual(target["profile_photo"]["download"], "ok")
+        self.assertEqual(
+            [payload for method, payload in gw.calls if method == "getUserProfilePhotos"],
+            [{"user_id": 456789, "offset": 0, "limit": 1}],
+        )
+
+    def test_invisible_bot_api_photo_exposes_guarded_userbot_fallback(self):
+        gw = MediaGateway()
+        message = {
+            "text": "скачай его аватарку и сделай портрет",
+            "reply_to_message": {
+                "message_id": 77,
+                "from": {"id": 456789, "first_name": "Reference"},
+            },
+        }
+
+        context = gw.media_context(message)
+
+        photo = context["person_targets"][0]["profile_photo"]
+        self.assertEqual(photo["download"], "unavailable")
+        self.assertEqual(photo["userbot_skill"], "userbot")
+        self.assertEqual(photo["userbot_operation"], "download_profile_photo")
+        self.assertIn("same registered Userbot operation", gw._hermes_instructions())
+
+    def test_plain_username_target_routes_to_registered_userbot_operation(self):
+        gw = MediaGateway()
+        gw.cfg.bot_username = "dis_rootbot"
+        text = "@alice сгенерируй её портрет"
+        message = {
+            "text": text,
+            "entities": [{"type": "mention", "offset": 0, "length": 6}],
+        }
+
+        context = gw.media_context(message)
+
+        target = context["person_targets"][0]
+        self.assertEqual(target["user"]["username"], "alice")
+        self.assertEqual(target["resolution"], "requires_userbot")
+        self.assertEqual(target["profile_photo"]["download"], "requires_userbot")
+        self.assertEqual(target["profile_photo"]["userbot_operation"], "download_profile_photo")
+        self.assertFalse(any(method == "getUserProfilePhotos" for method, _ in gw.calls))
+
+    def test_unrelated_reply_does_not_fetch_profile_photo(self):
+        gw = ProfilePhotoGateway()
+        message = {
+            "text": "объясни, что он имеет в виду",
+            "reply_to_message": {"from": {"id": 456789}, "text": "пример"},
+        }
+
+        context = gw.media_context(message)
+
+        self.assertNotIn("person_targets", context)
+        self.assertFalse(any(method == "getUserProfilePhotos" for method, _ in gw.calls))
+
+    def test_avatar_howto_does_not_fetch_personal_data_or_force_artifact(self):
+        gw = ProfilePhotoGateway()
+        message = {
+            "text": "объясни, как скачать его аватарку и сгенерировать портрет",
+            "reply_to_message": {"from": {"id": 456789}, "text": "пример"},
+        }
+
+        context = gw.media_context(message)
+
+        self.assertNotIn("person_targets", context)
+        self.assertFalse(gw._requires_media_artifact(message))
+        self.assertFalse(any(method == "getUserProfilePhotos" for method, _ in gw.calls))
+
+    def test_missing_media_artifact_gets_one_corrective_tool_attempt(self):
+        gw = MediaGateway()
+        output_dir = gw.tmp_path / "harness-output"
+        output_dir.mkdir()
+        artifact = output_dir / "portrait.jpg"
+        artifact.write_bytes(b"jpeg")
+        gw.cfg.harness_media_host_dir = output_dir
+        gw.cfg.harness_media_cache_dir = output_dir
+        gw.cfg.owner_media_allowed_dirs = (output_dir,)
+        message = {
+            "text": "сгенерируй его портрет по аватарке",
+            "reply_to_message": {"from": {"id": 456789}},
+        }
+        replies = []
+
+        def corrective_call(retry_message, progress_callback=None):
+            replies.append(retry_message)
+            return f"Готово.\nMEDIA:{artifact}"
+
+        with patch.object(gw, "call_hermes", side_effect=corrective_call):
+            result = gw._retry_missing_media_once(message, "Не могу получить аватар.")
+
+        self.assertEqual(len(replies), 1)
+        self.assertIn("preceding answer did not create", replies[0]["_guest_recovery_instruction"])
+        self.assertTrue(gw._has_deliverable_media_reference(result))
+
+    def test_missing_exact_person_target_does_not_retry_or_guess(self):
+        gw = MediaGateway()
+        output_dir = gw.tmp_path / "harness-output"
+        output_dir.mkdir()
+        gw.cfg.harness_media_host_dir = output_dir
+        gw.cfg.harness_media_cache_dir = output_dir
+        gw.cfg.owner_media_allowed_dirs = (output_dir,)
+        message = {"text": "скачай его аватарку и сгенерируй портрет"}
+
+        with patch.object(gw, "call_hermes") as call_hermes:
+            result = gw._retry_missing_media_once(message, "На кого именно?")
+
+        self.assertEqual(result, "На кого именно?")
+        call_hermes.assert_not_called()
 
     def test_media_diagnostic_log_excludes_file_ids_paths_and_chat_text(self):
         gw = MediaGateway()

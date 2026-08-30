@@ -253,6 +253,15 @@ owner's DM and then embeds the returned Telegram `file_id` into the rich
 article. A file left in a project, workspace, or temporary directory is
 intentionally rejected even when the generation tool itself succeeded.
 
+For avatar work, `GUEST_PROFILE_PHOTO_ENABLED=1` lets the sidecar call
+`getUserProfilePhotos` when an exact `user_id` is already present on the
+replied message author or a `text_mention` entity. The largest available photo
+is passed to Hermes as a local reference file. A plain `@username` has no Bot
+API user ID, so the harness routes it to the guarded Userbot
+`download_profile_photo` operation and never guesses a similarly named user.
+`GUEST_TOOL_RECOVERY_ENABLED=1` allows exactly one corrective harness attempt
+when an explicit media task finishes without a verified allowlisted artifact.
+
 ## 6. Start and verify
 
 Run the check first:
@@ -329,6 +338,11 @@ profile's `.env`, persona, skills, memory, or history. For direct Python
 execution, set `GUEST_HARNESS_MEDIA_HOST_DIR`,
 `GUEST_HARNESS_MEDIA_CACHE_DIR`, and `GUEST_OWNER_MEDIA_ALLOWED_DIRS`
 explicitly because Compose normally supplies the container-side values.
+
+With Bot API 10.3, general files are also embedded as native `document`
+blocks, Markdown tables use compact cell spacing, and an explicit
+`<blockquote expandable>` HTML block becomes a collapsible quotation. Normal
+quotations are not collapsed automatically.
 
 ## Direct Python execution (optional)
 

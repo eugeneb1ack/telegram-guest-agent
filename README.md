@@ -15,11 +15,12 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 - Starts a new session for every standalone invocation; a reply to a recent guest answer continues its session for a configurable TTL (120 seconds by default).
 - Uses Hermes Runs when available, passing a stable `session_id`. For a standard OpenAI-compatible Chat Completions endpoint, it keeps a bounded, in-memory six-turn transcript for the same reply window.
 - Replaces the initial placeholder with live, privacy-safe activity such as «Открываю страницу…» or «Запускаю тесты…» when Hermes reports a real tool event.
+- Supplies the latest Bot-API-visible profile photo as tool input when an explicit avatar task targets the exact author of a replied message or a `text_mention`. Plain `@username` targets are routed to the guarded Userbot operation instead of being guessed.
 - Persists the delivery queue before acknowledging an update, so long agent runs do not block polling and survive a sidecar restart.
 - Downloads inbound media into a sandbox, caps its size, and sanitizes local paths in every public answer.
 - Preserves the original Telegram `chat_id`, `message_id`, and `sender_id` beside voice/audio media so an installed `userbot` skill can use Telegram-native MTProto transcription instead of silently falling back to Whisper.
 - Stages explicitly allowed local output media through the owner DM before reusing the returned Telegram `file_id` in a public rich reply.
-- Uses Bot API rich message blocks when available and falls back to ordinary text if Telegram rejects the rich payload.
+- Uses Bot API 10.3 rich message blocks when available, including compact tables, expandable quotations, and embedded documents; falls back to ordinary text if Telegram rejects the rich payload.
 
 ## Session behaviour
 
@@ -100,6 +101,23 @@ answer. The sidecar stages that file in the owner's DM, reuses Telegram's
 returned `file_id`, and appends the media block to the final rich article.
 Paths from a workspace, project, or temporary directory remain blocked and
 redacted even if the underlying generation tool succeeded.
+
+For an explicit avatar/profile-photo request, the sidecar calls
+`getUserProfilePhotos` only after an exact user ID is available from the
+replied message or a `text_mention`. The largest current photo is downloaded
+through the inbound media bridge and exposed in
+`media_context.person_targets` as tool input. A plain `@username` contains no
+Bot API user ID, so the harness must use the guarded Userbot
+`download_profile_photo` operation. If the first answer to an explicit media
+task has no verified allowlisted artifact, the sidecar performs one corrective
+run in the same short-lived session. It never loops or silently chooses a
+similarly named user.
+
+Generated general files are staged through the same private owner-DM bridge as
+images and embedded as Bot API 10.3 `document` blocks. Markdown tables use the
+new compact cell layout. An explicit `<blockquote expandable>` block is kept as
+a native collapsible quotation; ordinary quotations remain ordinary, so the
+renderer does not unexpectedly hide content.
 
 ## Live activity status
 

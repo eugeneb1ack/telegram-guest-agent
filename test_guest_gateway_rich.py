@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 
-from guest_gateway import Config, GuestGateway, GuestJob
+from guest_gateway import Config, GuestGateway, GuestJob, UploadedMedia
 
 
 class FakeGateway(GuestGateway):
@@ -235,6 +235,7 @@ class RichGatewayTests(unittest.TestCase):
             '<tg-map lat="41.9" long="12.5" zoom="14"/>': ["map"],
             "<tg-collage>\n![](https://telegram.org/example/photo.jpg)\n![](https://telegram.org/example/video.mp4)\n</tg-collage>": ["collage"],
             "<details><summary>Подробности</summary>Скрытый текст</details>": ["details"],
+            "<blockquote expandable>\nКоротко\nскрываемые подробности\n</blockquote>": ["expandable_blockquote"],
             "<u>underlined</u> and <sup>2</sup>": ["paragraph"],
         }
 
@@ -242,6 +243,26 @@ class RichGatewayTests(unittest.TestCase):
             with self.subTest(sample=sample):
                 blocks = gw._input_rich_message(sample)["blocks"]
                 self.assertEqual([block["type"] for block in blocks], expected_types)
+
+    def test_bot_api_10_3_tables_are_compact(self):
+        gw = FakeGateway()
+
+        table = gw._input_rich_message("| A | B |\n|---|---|\n| 1 | 2 |")["blocks"][0]
+
+        self.assertIs(table["is_compact"], True)
+
+    def test_bot_api_10_3_document_is_embedded_in_rich_answer(self):
+        gw = FakeGateway()
+        document = UploadedMedia(kind="document", file_id="doc-file", caption="Отчёт")
+
+        rich = gw._input_rich_message("Готово.", uploaded_media=[document])
+
+        self.assertEqual(rich["blocks"][-1]["type"], "document")
+        self.assertEqual(
+            rich["blocks"][-1]["document"],
+            {"type": "document", "media": "doc-file"},
+        )
+        self.assertEqual(rich["blocks"][-1]["caption"]["text"], "Отчёт")
 
     def test_table_links_stay_native_rich_markdown(self):
         gw = FakeGateway()
