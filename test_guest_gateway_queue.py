@@ -632,6 +632,43 @@ class GuestQueueTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "model auth failed"):
                 GuestGateway.call_hermes(gw, update(1, "q1", "slow")["guest_message"])
 
+    def test_policy_refusal_is_private_not_retried_and_worker_continues(self):
+        gw = FakeGateway()
+        gw.cfg.hermes_use_runs = True
+        gw.cfg.worker_count = 1
+        gw.cfg.hermes_run_max_attempts = 3
+        gw.cfg.hermes_run_retry_backoff = 0
+        gw.call_hermes = lambda message, progress_callback=None: GuestGateway.call_hermes(gw, message, progress_callback)
+        starts = []
+
+        def fake_http_json(url, payload=None, headers=None, timeout=60):
+            if url.endswith("/v1/runs"):
+                starts.append(payload["input"])
+                return {"run_id": f"run_{len(starts)}", "status": "started"}
+            if url.endswith("/v1/runs/run_1"):
+                return {"status": "failed", "error": "content_policy_blocked: private reasoning marker; try again"}
+            if url.endswith("/v1/runs/run_2"):
+                return {"status": "completed", "output": "Обычный ответ работает."}
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch("guest_gateway.http_json", fake_http_json), redirect_stdout(io.StringIO()) as logs:
+            gw.start_worker()
+            try:
+                gw.handle_guest(update(1, "q1", "first request"))
+                gw.jobs.join()
+                gw.handle_guest(update(2, "q2", "second request"))
+                gw.jobs.join()
+            finally:
+                gw.stop_worker()
+        replies = [rich_or_text({"rich_message": payload["rich_message"]}) for method, payload in gw.calls if method == "sendRichMessage"]
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(len(replies), 2)
+        self.assertIn("ограничений безопасности", replies[0])
+        self.assertEqual(replies[1], "Обычный ответ работает.")
+        self.assertNotIn("private reasoning marker", str(replies) + logs.getvalue())
+        self.assertNotIn("run_1", replies[0])
+        self.assertNotIn("Сломалась", replies[0])
+
     def test_media_env_knobs_are_configurable(self):
         env = {
             "GUEST_BOT_TOKEN": "token",

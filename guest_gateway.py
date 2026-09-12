@@ -923,6 +923,16 @@ class Config:
         )
 
 
+class HermesContentPolicyError(RuntimeError):
+    """A terminal provider refusal, with no internal response text attached."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Модель не смогла ответить на этот запрос из-за ограничений безопасности. "
+            "Бот работает; можно задать другой вопрос."
+        )
+
+
 class GuestGateway:
     def __init__(self, cfg: Config, state_path: Path = DEFAULT_STATE):
         self.cfg = cfg
@@ -2655,6 +2665,10 @@ class GuestGateway:
                     f"hermes reply ok update_id={job.update_id} elapsed={time.time() - started:.2f}s chars={len(reply)}",
                     flush=True,
                 )
+            except HermesContentPolicyError as e:
+                failed = True
+                reply = str(e)
+                print("hermes reply declined by provider", flush=True)
             except Exception as e:
                 failed = True
                 reply = "Сломалась на вызове агента: " + redact(str(e))[:1000]
@@ -2886,6 +2900,8 @@ class GuestGateway:
 
     def _is_transient_hermes_run_error(self, error: Exception | str) -> bool:
         """Return True for provider/API failures worth retrying with a fresh Hermes run."""
+        if isinstance(error, HermesContentPolicyError):
+            return False
         text = str(error).lower().strip()
         if self._is_transient_poll_error(RuntimeError(text)):
             return True
@@ -3073,6 +3089,8 @@ class GuestGateway:
                     return response
                 if state in {"failed", "cancelled"}:
                     error = status.get("error") or f"Hermes run {run_id} {state}"
+                    if state == "failed" and str(error).startswith("content_policy_blocked:"):
+                        raise HermesContentPolicyError()
                     raise RuntimeError(f"Hermes run {run_id} {state}: {error}")
                 time.sleep(self.cfg.hermes_poll_interval)
         finally:
