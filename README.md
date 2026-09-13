@@ -4,7 +4,7 @@
   <img src="assets/telegram-guest-agent-cover.png" alt="Telegram Guest Agent — manga-style Guest Agent flow" width="100%">
 </p>
 
-Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. It accepts a guest request, gives the agent a stable short-lived reply context, and returns a safe Telegram response without exposing the harness, local files, or credentials.
+Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. It accepts a guest request, gives the agent a isolated, durable reply context, and returns a safe Telegram response without exposing the harness, local files, or credentials.
 
 **Install:** [English](docs/installation.en.md) · [Русский](docs/installation.ru.md)
 
@@ -12,8 +12,8 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 
 - Polls `guest_message` updates with a dedicated Telegram bot token, avoiding `getUpdates` conflicts with a main bot.
 - Fails closed: only the numeric `GUEST_OWNER_ID` may invoke the agent.
-- Starts a new session for every standalone invocation; a reply to a recent guest answer continues its session for a configurable TTL (120 seconds by default).
-- Uses Hermes Runs when available, passing a stable `session_id`. For a standard OpenAI-compatible Chat Completions endpoint, it keeps a bounded, in-memory six-turn transcript for the same reply window.
+- Starts a new session for every standalone mention; an explicit mention replying to a registered bot answer resumes that exact branch, including after other branches or gateway restarts.
+- Uses Hermes Runs with a stable `session_id`, matching `X-Hermes-Session-Key` and authoritative branch history. Standard Chat Completions endpoints receive the same bounded transcript in `messages`.
 - Replaces the initial placeholder with live, privacy-safe activity such as «Открываю страницу…» or «Запускаю тесты…» when Hermes reports a real tool event.
 - Supplies the latest Bot-API-visible profile photo as tool input when an explicit avatar task targets the exact author of a replied message or a `text_mention`. Plain `@username` targets are routed to the guarded Userbot operation instead of being guessed.
 - Persists the delivery queue before acknowledging an update, so long agent runs do not block polling and survive a sidecar restart.
@@ -25,14 +25,45 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 ## Session behaviour
 
 ```text
-new @bot request ──> new session
-reply to recent guest answer ──> same session, until TTL expires
-new @bot request again ──> a different new session
+@bot + no reply                  -> new branch A
+reply to A's answer + @bot        -> continue A
+@bot + no reply                  -> new branch B
+reply to an old A answer + @bot   -> return to A
+reply to another person + @bot   -> new branch C, with that quoted message
+reply without @bot               -> ignored
 ```
 
-The reply relationship is the boundary. The agent never carries history from one standalone request into another just because they are in the same chat.
+Each branch is scoped to the bot, chat, topic and invoking owner. Other users
+cannot invoke the agent or append messages to its history. Only an explicit
+Telegram mention in the current message can start work: an ordinary reply,
+an unrelated mention or a bot command alone produces no answer or reaction.
+`GUEST_BOT_USERNAME` is required for username mentions; an unset value never
+turns off the mention gate. The same gate applies to restored queued requests.
+Only the current owner request and its immediate reply target enter the payload; nested replies
+and surrounding chat history are excluded. An unknown or expired bot answer
+starts a fresh branch with its visible text as a quote, never the latest branch.
+Inline answer IDs are decoded using Telegram's known 20/24-byte formats and
+validated against the source peer. Unsupported IDs fail closed.
 
-Hermes Runs is the preferred transport: the harness receives a stable `session_id` and can own long-lived conversation state. Chat Completions mode is compatible with ordinary OpenAI-style endpoints, but its local transcript is deliberately small, process-local, and cleared on gateway restart. It is designed for short reply continuations, not a durable chat archive.
+Branches expire after **30 days of inactivity** (`GUEST_SESSION_TTL=2592000`).
+The gateway retains at most 200 inactive/active recent branches plus in-flight
+work, and 10,000 answer anchors. Each transcript holds the initial exchange and
+up to 23 recent exchanges, bounded to 120,000 characters (30,000 per message).
+This is a bounded conversation window, not an unlimited archive. Anchors and
+history are persisted atomically in the private `runtime/state.json` (0600).
+The retention policy governs gateway state; it does not delete Hermes logs or
+archives. Requests in one branch run sequentially; other branches may run in
+parallel.
+
+Hermes Runs receives authoritative history even for a fresh session, preventing
+implicit restoration of an unrelated harness transcript. The bootstrap disables
+shared profile memory and external memory providers for the dedicated guest
+profile; persona, skills and tool access remain profile-owned. Existing installs
+must apply the memory settings described in the installation guides.
+
+When upgrading from the older 120-second routing, ambiguous legacy anchors are
+not imported. Queued requests survive, but start isolated sessions. An answer
+sent before this upgrade can supply quoted text, not reconstruct missing history.
 
 ## Quick start
 
@@ -67,10 +98,10 @@ The gateway is intentionally narrow transport glue. Keep persona, tools, and pol
 
 | Mode | Required endpoint | Context contract |
 | --- | --- | --- |
-| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}`; optional `GET /v1/runs/{run_id}/events` | Receives a stable `session_id` and, for a valid reply, the bounded `conversation_history`; the SSE endpoint adds live activity updates. |
+| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}`; optional `GET /v1/runs/{run_id}/events` | Receives a stable `session_id`, matching `X-Hermes-Session-Key`, and authoritative `conversation_history`; the SSE endpoint adds live activity updates. |
 | `HERMES_USE_RUNS=0` | OpenAI-style `POST /v1/chat/completions` | Receives a normal `messages` array; this gateway supplies the same bounded local reply history. |
 
-Both modes retain up to six request/answer pairs for a valid reply session. The buffer expires with `GUEST_PENDING_ANCHOR_TTL`, is cleared when the sidecar restarts, and is never written to `state.json`. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
+Both modes use the durable bounded history described above. `GUEST_PENDING_ANCHOR_TTL` is obsolete and no longer affects routing. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
 
 ### Telegram-native voice transcription
 
@@ -110,7 +141,7 @@ through the inbound media bridge and exposed in
 Bot API user ID, so the harness must use the guarded Userbot
 `download_profile_photo` operation. If the first answer to an explicit media
 task has no verified allowlisted artifact, the sidecar performs one corrective
-run in the same short-lived session. It never loops or silently chooses a
+run in the same isolated session. It never loops or silently chooses a
 similarly named user.
 
 Generated general files are staged through the same private owner-DM bridge as
@@ -131,7 +162,7 @@ Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GU
 
 - Do not reuse the Telegram token of another polling bot.
 - `.env`, `runtime/`, `state.json`, generated media, and logs are ignored by Git. Never commit or publish them.
-- `runtime/state.json` can contain queued Telegram update payloads. The gateway writes it atomically with owner-only file permissions where supported; the Docker helper runs as the host UID/GID so `runtime/` may remain `0700` and state files `0600`.
+- `runtime/state.json` contains accepted owner requests, their explicit reply targets, answers and queued work. The gateway writes it atomically with owner-only file permissions where supported; the Docker helper runs as the host UID/GID so `runtime/` may remain `0700` and state files `0600`.
 - Inbound media is untrusted and lands in `/sandbox/inbound` in Docker. The container is non-root, read-only, drops Linux capabilities, uses `no-new-privileges`, and has a constrained temporary filesystem.
 - The Docker runner derives the host side of the media bridge from the active checkout on every start; Compose uses that exact path for both the bind mount and the path given to the harness, preventing stale media paths after a deployment move.
 - Local files may be staged only from `GUEST_OWNER_MEDIA_ALLOWED_DIRS`. Everything else is rejected. Public responses redact `MEDIA:`, `file://`, Windows paths, and sensitive POSIX paths.

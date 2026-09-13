@@ -234,7 +234,7 @@ The endpoint must accept `model`, `messages`, `stream: false`, bearer authentica
 {"choices":[{"message":{"content":"answer text"}}]}
 ```
 
-In both modes, the gateway keeps the last six prompt/answer turns in memory for each active reply session. That history expires with `GUEST_PENDING_ANCHOR_TTL` (120 seconds by default) and is lost on gateway restart; it is never written into `state.json`.
+Both modes persist branch history and answer anchors atomically in private `runtime/state.json` (0600), surviving restarts. Branches expire after 30 days of inactivity (`GUEST_SESSION_TTL=2592000`). The initial exchange and up to 23 recent exchanges are retained, bounded to 120,000 characters total and 30,000 per message. Limits are 200 recent branches plus in-flight work and 10,000 message anchors. `GUEST_PENDING_ANCHOR_TTL` is obsolete. Retention covers gateway state, not Hermes archives.
 
 Chat Completions has no standard tool-lifecycle stream. In this mode the gateway keeps the static placeholder instead of showing guessed activity.
 
@@ -306,11 +306,26 @@ image block in the guest rich article.
 
 ## 7. Test session semantics
 
-1. Invoke the guest bot with an explicit `@your_guest_bot_username` mention or command. This starts a fresh session.
-2. Reply to the resulting guest answer and invoke the bot again. The reply is eligible to continue the short-lived session.
-3. Start another standalone invocation. It receives a new session and cannot inherit the earlier history.
+1. `@bot` without a reply starts a new branch.
+2. Reply to a specific bot answer **with another `@bot` mention** to continue that branch.
+3. A new standalone mention starts a different branch. Replying to an old answer returns to its branch until expiry.
+4. Replying to another person with `@bot` starts a new branch with only that message as quoted source. Subsequent owner/bot conversation stays in that branch.
+5. Unmentioned messages and other callers are ignored. Surrounding chat, nested replies and other topics are excluded.
 
-If a Telegram Guest Mode client delivers a plain reply separately, the gateway temporarily anchors it; the next explicit invocation in that reply scope consumes the anchor.
+Branches are scoped to bot, chat, topic and owner. Unknown or expired answers provide only quoted text for a fresh branch. Ambiguous anchors from the old version are not imported; queued work survives. Turns in one branch execute sequentially.
+
+Runs receives matching `session_id` and `X-Hermes-Session-Key` plus explicit `conversation_history`. An empty window uses a system boundary to prevent implicit Hermes history hydration.
+
+The dedicated guest profile must disable shared automatic memory so `MEMORY.md` and `USER.md` do not enter every branch. The bootstrap configures this automatically. For an existing **guest** profile:
+
+```yaml
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  provider: ''
+```
+
+The memory files are retained. Other profiles, including trainer, do not need changes. Restart only the guest profile gateway after changing its configuration.
 
 ## Media configuration
 

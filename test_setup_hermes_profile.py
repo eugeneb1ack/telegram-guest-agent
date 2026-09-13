@@ -130,6 +130,9 @@ exit 2
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("profile create telegram-guest-agent", log)
         self.assertIn('config set platform_toolsets.api_server ["hermes-cli"]', log)
+        self.assertIn("config set memory.memory_enabled false", log)
+        self.assertIn("config set memory.user_profile_enabled false", log)
+        self.assertIn("config set memory.provider ", log)
         self.assertIn("gateway install --force --start-now", log)
 
     def test_existing_profile_requires_reuse_and_preserves_key(self):

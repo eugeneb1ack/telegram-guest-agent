@@ -22,6 +22,7 @@ class FakeGateway(GuestGateway):
             hermes_url="http://127.0.0.1:1/v1/chat/completions",
             hermes_key="key",
             model="test-model",
+            bot_username="guest_bot",
             worker_count=2,
             placeholder_enabled=False,
             hermes_use_runs=False,
@@ -39,9 +40,10 @@ class FakeGateway(GuestGateway):
         return {"ok": True, "result": []}
 
     def call_hermes(self, message, progress_callback=None):
-        self.hermes_calls.append(message.get("text"))
+        text = message.get("text", "").removeprefix("@guest_bot ")
+        self.hermes_calls.append(text)
         time.sleep(0.01)
-        return f"final: {message.get('text')}"
+        return f"final: {text}"
 
 class MediaGateway(GuestGateway):
     def __init__(self):
@@ -137,7 +139,8 @@ def update(update_id, query_id, text, caller_id=123456789):
             "guest_query_id": query_id,
             "from": {"id": caller_id, "username": "guest_owner"},
             "chat": {"id": -100123, "type": "supergroup", "title": "test"},
-            "text": text,
+            "text": "@guest_bot " + text,
+            "entities": [{"type": "mention", "offset": 0, "length": len("@guest_bot")}],
         },
     }
 
@@ -498,7 +501,7 @@ class GuestQueueTests(unittest.TestCase):
             self.assertEqual(GuestGateway.call_hermes(gw, message), "done")
 
         self.assertEqual(calls[0]["url"], "http://127.0.0.1:1/v1/runs")
-        self.assertEqual(calls[0]["payload"]["input"].splitlines()[-1], "message: slow task")
+        self.assertEqual(calls[0]["payload"]["input"].splitlines()[-1], "message: @guest_bot slow task")
         self.assertNotIn("session_id", calls[0]["payload"])
         self.assertEqual(calls[0]["timeout"], 30)
         self.assertEqual(calls[1]["timeout"], 20)
@@ -510,7 +513,7 @@ class GuestQueueTests(unittest.TestCase):
         calls = []
 
         def fake_http_json(url, payload=None, headers=None, timeout=60):
-            calls.append({"url": url, "payload": payload})
+            calls.append({"url": url, "payload": payload, "headers": headers})
             if url.endswith("/v1/runs"):
                 return {"run_id": "run_1", "status": "started"}
             if url.endswith("/v1/runs/run_1"):
@@ -523,6 +526,7 @@ class GuestQueueTests(unittest.TestCase):
             self.assertEqual(GuestGateway.call_hermes(gw, message), "done")
 
         self.assertEqual(calls[0]["payload"]["session_id"], gw._guest_session_id(message))
+        self.assertEqual(calls[0]["headers"]["X-Hermes-Session-Key"], gw._guest_session_id(message))
 
     def test_runs_keep_reply_history_and_reset_new_sessions(self):
         gw = FakeGateway()
@@ -554,12 +558,12 @@ class GuestQueueTests(unittest.TestCase):
             self.assertEqual(GuestGateway.call_hermes(gw, followup), "followup answer")
             self.assertEqual(GuestGateway.call_hermes(gw, fresh), "fresh answer")
 
-        self.assertNotIn("conversation_history", start_payloads[0])
+        self.assertEqual(start_payloads[0]["conversation_history"][0]["role"], "system")
         history = start_payloads[1]["conversation_history"]
         self.assertIn("first question", "\n".join(item["content"] for item in history))
         self.assertIn("first answer", "\n".join(item["content"] for item in history))
-        self.assertNotIn("conversation_history", start_payloads[2])
-        self.assertNotIn("reply_sessions", gw._load_state())
+        self.assertEqual(start_payloads[2]["conversation_history"][0]["role"], "system")
+        self.assertIn("reply_sessions", gw._load_state())
 
     def test_chat_completions_keep_reply_history_and_reset_new_sessions(self):
         gw = FakeGateway()
@@ -593,7 +597,7 @@ class GuestQueueTests(unittest.TestCase):
         self.assertNotIn("first question", fresh_contents)
         self.assertNotIn("first answer", fresh_contents)
         self.assertNotIn("session_id", calls[1])
-        self.assertNotIn("reply_sessions", gw._load_state())
+        self.assertIn("reply_sessions", gw._load_state())
 
     def test_run_poll_timeout_is_transient_not_final_failure(self):
         gw = FakeGateway()

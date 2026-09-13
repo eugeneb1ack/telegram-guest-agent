@@ -203,6 +203,11 @@ hermes -p "$PROFILE" config set platforms.api_server.extra.port "$PORT"
 # still hide unavailable tools, while custom skills and configured MCP/plugin
 # toolsets remain profile-owned instead of being duplicated in this project.
 hermes -p "$PROFILE" config set platform_toolsets.api_server '["hermes-cli"]'
+# Guest branches supply their own history. A cloned profile's persistent
+# memories must not be injected into every public guest conversation.
+hermes -p "$PROFILE" config set memory.memory_enabled false
+hermes -p "$PROFILE" config set memory.user_profile_enabled false
+hermes -p "$PROFILE" config set memory.provider ''
 if [[ -n "$MODEL" ]]; then
   hermes -p "$PROFILE" config set model.default "$MODEL"
 fi

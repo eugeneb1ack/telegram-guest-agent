@@ -29,7 +29,8 @@ def update(update_id: int = 1) -> dict:
             "guest_query_id": f"q{update_id}",
             "from": {"id": 123456789},
             "chat": {"id": -100123, "type": "group", "title": "test"},
-            "text": "проверь задачу",
+            "text": "@guest_bot проверь задачу",
+            "entities": [{"type": "mention", "offset": 0, "length": len("@guest_bot")}],
         },
     }
 
@@ -232,6 +233,7 @@ class ProgressGatewayTests(unittest.TestCase):
                     hermes_url="http://127.0.0.1:1/v1/chat/completions",
                     hermes_key="key",
                     model="test",
+                    bot_username="guest_bot",
                     reactions_enabled=False,
                     placeholder_enabled=True,
                     progress_enabled=True,
