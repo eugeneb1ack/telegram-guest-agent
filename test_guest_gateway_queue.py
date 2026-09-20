@@ -283,6 +283,32 @@ class GuestQueueTests(unittest.TestCase):
         self.assertEqual([method for method, _payload in gw.calls if method in {"sendRichMessage", "sendMessage"}], [])
         self.assertEqual(gw.hermes_calls, ["first"])
 
+    def test_busy_guest_is_acknowledged_and_reuses_inline_placeholder(self):
+        gw = FakeGateway()
+        gw.cfg.placeholder_enabled = True
+        gw.cfg.placeholder_text = "working"
+        gw.handle_guest(update(1, "q1", "first"))
+        gw.handle_guest(update(2, "q2", "second"))
+
+        acknowledgements = [payload for method, payload in gw.calls if method == "answerGuestQuery"]
+        self.assertEqual(len(acknowledgements), 1)
+        self.assertIn(
+            "поставлена в очередь",
+            rich_or_text(acknowledgements[0]["result"]["input_message_content"]),
+        )
+        state = json.loads(gw.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["pending_jobs"]["update:2"]["inline_message_id"], "sent-final")
+
+        gw.running = False
+        gw.jobs.put(None)
+        gw._worker_loop()
+
+        acknowledgements = [payload for method, payload in gw.calls if method == "answerGuestQuery"]
+        edits = [payload for method, payload in gw.calls if method == "editMessageText"]
+        self.assertEqual(len(acknowledgements), 2)
+        self.assertEqual(len(edits), 2)
+        self.assertEqual(gw.hermes_calls, ["first", "second"])
+
     def test_worker_preserves_explicit_new_message_then_edit_mode(self):
         gw = FakeGateway()
         gw.cfg.placeholder_enabled = True

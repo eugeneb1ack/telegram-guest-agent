@@ -727,6 +727,7 @@ class GuestJob:
     queued_at: float
     context_thread_id: str = ""
     context_mode: str = "standalone"
+    inline_message_id: str | None = None
 
     @property
     def key(self) -> str:
@@ -742,6 +743,7 @@ class GuestJob:
             "queued_at": self.queued_at,
             "context_thread_id": self.context_thread_id,
             "context_mode": self.context_mode,
+            "inline_message_id": self.inline_message_id,
         }
 
     @classmethod
@@ -753,6 +755,11 @@ class GuestJob:
             queued_at=float(value.get("queued_at") or time.time()),
             context_thread_id=str(value.get("context_thread_id") or ""),
             context_mode=str(value.get("context_mode") or "standalone"),
+            inline_message_id=(
+                str(value["inline_message_id"])
+                if value.get("inline_message_id")
+                else None
+            ),
         )
 
 
@@ -2206,7 +2213,7 @@ class GuestGateway:
         rich_message = self._input_rich_message(text, uploaded_media=uploaded_media)
         return {"rich_message": rich_message}
 
-    def _placeholder_rich_message(self) -> dict[str, Any] | None:
+    def _placeholder_rich_message(self, text: str | None = None) -> dict[str, Any] | None:
         custom_emoji_id = self.cfg.placeholder_custom_emoji_id.strip()
         if not re.fullmatch(r"[1-9]\d*", custom_emoji_id):
             return None
@@ -2221,7 +2228,7 @@ class GuestGateway:
                             "alternative_text": self.cfg.placeholder_custom_emoji_alt.strip() or "🤔",
                         },
                         " ",
-                        self.cfg.placeholder_text,
+                        text or self.cfg.placeholder_text,
                     ],
                 }
             ]
@@ -2356,7 +2363,7 @@ class GuestGateway:
             uploaded_media = self._send_owner_media_for_reply(text, guest_query_id)
         rich = self.cfg.rich_messages_enabled
         fitted_text = self._fit_reply(text, uploaded_media=uploaded_media, rich=rich)
-        rich_message = self._placeholder_rich_message() if rich and purpose == "placeholder" else None
+        rich_message = self._placeholder_rich_message(text) if rich and purpose == "placeholder" else None
         payload = {
             "guest_query_id": guest_query_id,
             "result": self._guest_inline_result(
@@ -2551,12 +2558,12 @@ class GuestGateway:
             if job is None:
                 self.jobs.task_done()
                 break
-            inline_message_id = None
+            inline_message_id = job.inline_message_id
             progress_reporter = None
             try:
                 started = time.time()
                 failed = False
-                if self.cfg.placeholder_enabled:
+                if self.cfg.placeholder_enabled and not inline_message_id:
                     try:
                         inline_message_id = self.answer_guest(job.guest_query_id, self.cfg.placeholder_text, job.message, purpose="placeholder")
                     except Exception as e:
@@ -3230,6 +3237,34 @@ class GuestGateway:
             context_thread_id=str(context.get("thread_id") or ""),
             context_mode=str(context.get("mode") or "standalone"),
         )
+        with self.state_lock:
+            already_pending = job.key in self.pending_jobs
+            queued_ahead = len(self.pending_jobs)
+        if already_pending:
+            print(
+                "guest_job already pending",
+                f"update_id={update.get('update_id')}",
+                f"queue_size={self.jobs.qsize()}",
+                flush=True,
+            )
+            return
+        if queued_ahead and self.cfg.placeholder_enabled:
+            try:
+                acknowledged_inline_message_id = self.answer_guest(
+                    guest_query_id,
+                    "Уже выполняю другую задачу. Эта поставлена в очередь.",
+                    msg,
+                    purpose="placeholder",
+                )
+                if isinstance(acknowledged_inline_message_id, str) and acknowledged_inline_message_id:
+                    job.inline_message_id = acknowledged_inline_message_id
+            except Exception as e:
+                print(
+                    "guest queue acknowledgement failed:",
+                    redact(str(e))[:500],
+                    file=sys.stderr,
+                    flush=True,
+                )
         queued = self._persist_and_queue_job(job)
         print(
             "queued guest_job" if queued else "guest_job already pending",
