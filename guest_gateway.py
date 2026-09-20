@@ -782,7 +782,7 @@ class Config:
     hermes_max_runtime: int = 3600
     max_reply_chars: int = 3900
     rich_max_reply_chars: int = 30_000
-    worker_count: int = 3
+    worker_count: int = 1
     debug: bool = False
     bot_username: str = ""
     media_enabled: bool = True
@@ -834,7 +834,9 @@ class Config:
             raise SystemExit("GUEST_OWNER_ID must be a positive integer") from error
         if owner_id <= 0:
             raise SystemExit("GUEST_OWNER_ID must be a positive integer")
-        worker_count = int(os.environ.get("GUEST_WORKER_COUNT", "3"))
+        # One worker is the safe default for a shared Hermes profile/browser:
+        # different guest chats stay queued instead of driving tools concurrently.
+        worker_count = int(os.environ.get("GUEST_WORKER_COUNT", "1"))
         max_reply_chars = int(os.environ.get("GUEST_TEXT_MAX_REPLY_CHARS", "3900"))
         rich_max_reply_chars = int(os.environ.get("GUEST_RICH_MAX_REPLY_CHARS", "30000"))
         hermes_timeout = int(os.environ.get("HERMES_TIMEOUT", "300"))
@@ -2584,7 +2586,9 @@ class GuestGateway:
                 print("hermes reply declined by provider", flush=True)
             except Exception as e:
                 failed = True
-                reply = "Сломалась на вызове агента: " + redact(str(e))[:1000]
+                # Keep provider errors, run ids, local paths, and other internals out
+                # of the public reply. The detailed redacted error remains in logs.
+                reply = "Не удалось завершить запрос. Попробуйте ещё раз чуть позже."
                 print("hermes reply failed:", redact(str(e))[:500], flush=True)
             finally:
                 if progress_reporter is not None:
@@ -3016,6 +3020,27 @@ class GuestGateway:
                     error = status.get("error") or f"Hermes run {run_id} {state}"
                     if state == "failed" and str(error).startswith("content_policy_blocked:"):
                         raise HermesContentPolicyError()
+                    output = status.get("output")
+                    exit_reason = str(status.get("turn_exit_reason") or "")
+                    if (
+                        state == "failed"
+                        and exit_reason.startswith("max_iterations_reached(")
+                        and isinstance(output, str)
+                        and output.strip()
+                    ):
+                        # Hermes deliberately marks an iteration-budget exit as failed even
+                        # after its finalizer has made a bounded, tool-free summary. Deliver
+                        # that user-facing fallback instead of discarding it and leaking a
+                        # meaningless run id. All other failed states remain errors.
+                        self._remember_reply_session_exchange(session_id, prompt, output)
+                        print(
+                            "hermes run budget fallback delivered",
+                            f"run_id={run_id}",
+                            f"exit_reason={exit_reason}",
+                            f"chars={len(output)}",
+                            flush=True,
+                        )
+                        return output
                     raise RuntimeError(f"Hermes run {run_id} {state}: {error}")
                 time.sleep(self.cfg.hermes_poll_interval)
         finally:

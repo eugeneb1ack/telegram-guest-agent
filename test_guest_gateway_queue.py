@@ -387,7 +387,10 @@ class GuestQueueTests(unittest.TestCase):
         reaction_payloads = [payload for method, payload in gw.calls if method == "setMessageReaction"]
         self.assertEqual([p["reaction"][0]["emoji"] for p in reaction_payloads], ["👀", "👎"])
         answers = [payload for method, payload in gw.calls if method == "sendRichMessage"]
-        self.assertIn("Сломалась", rich_or_text({"rich_message": answers[0]["rich_message"]}))
+        error_reply = rich_or_text({"rich_message": answers[0]["rich_message"]})
+        self.assertIn("Не удалось завершить запрос", error_reply)
+        self.assertNotIn("boom", error_reply)
+        self.assertNotIn("run_", error_reply)
 
     def test_reaction_failure_does_not_block_queueing(self):
         class ReactionFailGateway(FakeGateway):
@@ -474,6 +477,17 @@ class GuestQueueTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             cfg = Config.from_env()
         self.assertEqual(cfg.hermes_poll_interval, 1.0)
+
+    def test_guest_workers_default_to_one_and_allow_explicit_override(self):
+        env = {
+            "GUEST_BOT_TOKEN": "token",
+            "GUEST_OWNER_ID": "123456789",
+            "HERMES_API_KEY": "key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(Config.from_env().worker_count, 1)
+        with patch.dict(os.environ, {**env, "GUEST_WORKER_COUNT": "3"}, clear=True):
+            self.assertEqual(Config.from_env().worker_count, 3)
 
     def test_compose_runtime_limit_allows_long_tool_runs(self):
         compose = (Path(__file__).parent / "compose.yaml").read_text()
@@ -635,6 +649,33 @@ class GuestQueueTests(unittest.TestCase):
         with patch("guest_gateway.http_json", fake_http_json):
             with self.assertRaisesRegex(RuntimeError, "model auth failed"):
                 GuestGateway.call_hermes(gw, update(1, "q1", "slow")["guest_message"])
+
+    def test_max_iterations_failed_run_delivers_budget_fallback(self):
+        gw = FakeGateway()
+        gw.cfg.hermes_use_runs = True
+        gw.cfg.hermes_poll_interval = 0.01
+        starts = []
+
+        def fake_http_json(url, payload=None, headers=None, timeout=60):
+            if url.endswith("/v1/runs"):
+                starts.append(payload)
+                return {"run_id": "run_budget", "status": "started"}
+            if url.endswith("/v1/runs/run_budget"):
+                return {
+                    "run_id": "run_budget",
+                    "status": "failed",
+                    "completed": False,
+                    "partial": False,
+                    "turn_exit_reason": "max_iterations_reached(20/20)",
+                    "output": "Вот лучший результат по уже собранным данным.",
+                }
+            raise AssertionError(f"unexpected url {url}")
+
+        message = update(1, "q1", "research request")["guest_message"]
+        with patch("guest_gateway.http_json", fake_http_json):
+            reply = GuestGateway.call_hermes(gw, message)
+        self.assertEqual(reply, "Вот лучший результат по уже собранным данным.")
+        self.assertEqual(len(starts), 1)
 
     def test_policy_refusal_is_private_not_retried_and_worker_continues(self):
         gw = FakeGateway()
