@@ -312,3 +312,15 @@ The test suite covers queue durability, context routing, Runs payloads and live 
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+### Native reply quotes
+
+The sidecar preserves the current invocation's `quote` separately from the full
+`reply_to_message`. `telegram_context.quote.selected_text` is the fragment to
+answer about. Both `TextQuote.text` and Bot API 10.4 `rich_texts` are supported;
+quote entities, manual-selection flag and approximate UTF-16 position are kept.
+An external reply carries only its supplied origin/chat/message identifiers,
+without fetching surrounding messages or importing another session.
+
+Reference: [Telegram TextQuote](https://core.telegram.org/bots/api#textquote).
+The sidecar uses Python's standard library and does not pin a Telegram SDK.
