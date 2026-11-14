@@ -289,6 +289,7 @@ class GuestQueueTests(unittest.TestCase):
         gw.cfg.placeholder_text = "working"
         gw.handle_guest(update(1, "q1", "first"))
         gw.handle_guest(update(2, "q2", "second"))
+        gw.notices.join()
 
         acknowledgements = [payload for method, payload in gw.calls if method == "answerGuestQuery"]
         self.assertEqual(len(acknowledgements), 1)
@@ -352,11 +353,11 @@ class GuestQueueTests(unittest.TestCase):
         gw.jobs.put(None)
         gw._worker_loop()
 
-        owner_messages = [payload for method, payload in gw.calls if method == "sendMessage"]
+        owner_messages = [payload for method, payload in gw.calls if method == "sendRichMessage"]
         self.assertEqual(len(owner_messages), 1)
         self.assertEqual(owner_messages[0]["chat_id"], 123456789)
-        self.assertIn("Не смог отправить ответ в guest-чат", owner_messages[0]["text"])
-        self.assertIn("final: first", owner_messages[0]["text"])
+        self.assertIn("Не смог отправить ответ в guest-чат", rich_or_text(owner_messages[0]))
+        self.assertIn("final: first", rich_or_text(owner_messages[0]))
 
     def test_worker_falls_back_to_placeholder_edit_when_new_chat_message_fails(self):
         class SendFailGateway(FakeGateway):
@@ -430,6 +431,7 @@ class GuestQueueTests(unittest.TestCase):
         gw.handle_guest(update(1, "q1", "first"))
 
         self.assertEqual(gw.jobs.qsize(), 1)
+        gw.notices.join()
         self.assertEqual([method for method, _payload in gw.calls if method == "setMessageReaction"], ["setMessageReaction"])
 
     def test_hermes_timeout_is_configurable(self):
@@ -703,6 +705,88 @@ class GuestQueueTests(unittest.TestCase):
         self.assertEqual(reply, "Вот лучший результат по уже собранным данным.")
         self.assertEqual(len(starts), 1)
 
+    def test_native_failed_run_with_output_reaches_telegram_without_retry(self):
+        gw = FakeGateway()
+        gw.cfg.hermes_use_runs = True
+        gw.cfg.hermes_run_max_attempts = 3
+        gw.cfg.hermes_run_retry_backoff = 0
+        gw.call_hermes = lambda message, progress_callback=None: GuestGateway.call_hermes(gw, message, progress_callback)
+        starts = []
+
+        def fake_http_json(url, payload=None, headers=None, timeout=60):
+            if url.endswith("/v1/runs"):
+                starts.append(payload)
+                return {"run_id": "run_native", "status": "started"}
+            if url.endswith("/v1/runs/run_native"):
+                # Current Hermes canonical projection drops terminal reason/error.
+                return {"run_id": "run_native", "status": "failed", "output": "Сохранённый разбор перепалки."}
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch("guest_gateway.http_json", fake_http_json):
+            gw.start_worker()
+            try:
+                gw.handle_guest(update(1, "q1", "analyse chat"))
+                gw.jobs.join()
+            finally:
+                gw.stop_worker()
+
+        replies = [rich_or_text(payload) for method, payload in gw.calls if method == "sendRichMessage"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(replies), 1)
+        self.assertIn("завершился не полностью", replies[0])
+        self.assertIn("Сохранённый разбор перепалки.", replies[0])
+        self.assertNotIn("run_native", replies[0])
+        self.assertFalse(gw.pending_jobs)
+        reactions = [payload for method, payload in gw.calls if method == "setMessageReaction"]
+        self.assertEqual(reactions[-1]["reaction"], [{"type": "emoji", "emoji": gw.cfg.reaction_failure}])
+
+    def test_cancelled_run_output_is_not_recovered(self):
+        gw = FakeGateway()
+        gw.cfg.hermes_use_runs = True
+
+        def fake_http_json(url, payload=None, headers=None, timeout=60):
+            if url.endswith("/v1/runs"):
+                return {"run_id": "run_cancelled", "status": "started"}
+            return {"status": "cancelled", "output": "An interrupted draft."}
+
+        with patch("guest_gateway.http_json", fake_http_json):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                GuestGateway.call_hermes(gw, update(1, "q1", "cancelled request")["guest_message"])
+
+    def test_codex_provider_diagnostic_is_not_a_saved_answer_or_retried(self):
+        gw = FakeGateway()
+        gw.cfg.hermes_use_runs = True
+        gw.cfg.hermes_run_max_attempts = 3
+        gw.cfg.hermes_run_retry_backoff = 0
+        gw.call_hermes = lambda message, progress_callback=None: GuestGateway.call_hermes(gw, message, progress_callback)
+        diagnostic = (
+            "ChatGPT or Codex Subscription rejected this request as malformed, so the model didn't answer. "
+            "Start a clean session with /new or switch models with /model; if it keeps happening, run hermes doctor."
+            '\n\nProvider said: HTTP 400: {"detail":"Bad Request"}'
+        )
+        starts = []
+
+        def fake_http_json(url, payload=None, headers=None, timeout=60):
+            if url.endswith("/v1/runs"):
+                starts.append(payload)
+                return {"run_id": "run_bad_request", "status": "started"}
+            return {"status": "failed", "output": diagnostic}
+
+        with patch("guest_gateway.http_json", fake_http_json), redirect_stdout(io.StringIO()) as logs:
+            gw.start_worker()
+            try:
+                gw.handle_guest(update(1, "q1", "Анимируй в гиф."))
+                gw.jobs.join()
+            finally:
+                gw.stop_worker()
+
+        replies = [rich_or_text(payload) for method, payload in gw.calls if method == "sendRichMessage"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(replies, ["Не удалось завершить запрос. Попробуйте ещё раз чуть позже."])
+        self.assertIn("HTTP 400", logs.getvalue())
+        self.assertFalse(gw.pending_jobs)
+        self.assertTrue(all(not session["messages"] for session in gw.reply_sessions.values()))
+
     def test_policy_refusal_is_private_not_retried_and_worker_continues(self):
         gw = FakeGateway()
         gw.cfg.hermes_use_runs = True
@@ -717,7 +801,7 @@ class GuestQueueTests(unittest.TestCase):
                 starts.append(payload["input"])
                 return {"run_id": f"run_{len(starts)}", "status": "started"}
             if url.endswith("/v1/runs/run_1"):
-                return {"status": "failed", "error": "content_policy_blocked: private reasoning marker; try again"}
+                return {"status": "failed", "error": "content_policy_blocked: private reasoning marker; try again", "output": "blocked output must not be recovered"}
             if url.endswith("/v1/runs/run_2"):
                 return {"status": "completed", "output": "Обычный ответ работает."}
             raise AssertionError(f"unexpected url {url}")
@@ -737,6 +821,7 @@ class GuestQueueTests(unittest.TestCase):
         self.assertIn("ограничений безопасности", replies[0])
         self.assertEqual(replies[1], "Обычный ответ работает.")
         self.assertNotIn("private reasoning marker", str(replies) + logs.getvalue())
+        self.assertNotIn("blocked output must not be recovered", str(replies) + logs.getvalue())
         self.assertNotIn("run_1", replies[0])
         self.assertNotIn("Сломалась", replies[0])
 
@@ -1104,6 +1189,18 @@ class GuestQueueTests(unittest.TestCase):
         self.assertNotIn("person_targets", context)
         self.assertFalse(gw._requires_media_artifact(message))
         self.assertFalse(any(method == "getUserProfilePhotos" for method, _ in gw.calls))
+
+    def test_animation_requests_require_media_without_fetching_an_avatar(self):
+        gw = ProfilePhotoGateway()
+        for text in ("@guest_bot Анимируй в гиф.", "Сделай GIF из картинки", "Animate this image"):
+            with self.subTest(text=text):
+                message = {"text": text, "reply_to_message": {"from": {"id": 456789}}}
+                self.assertTrue(gw._requires_media_artifact(message))
+                self.assertFalse(gw._wants_profile_photo(message))
+        for text in ("Объясни, как анимировать картинку", "Как анимировать фото?", "how to make a GIF", "Что такое GIF?"):
+            with self.subTest(text=text):
+                self.assertFalse(gw._requires_media_artifact({"text": text}))
+        self.assertFalse(gw.calls)
 
     def test_missing_media_artifact_gets_one_corrective_tool_attempt(self):
         gw = MediaGateway()

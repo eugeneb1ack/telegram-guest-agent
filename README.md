@@ -12,11 +12,12 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 
 - Polls `guest_message` updates with a dedicated Telegram bot token, avoiding `getUpdates` conflicts with a main bot.
 - Fails closed: only the numeric `GUEST_OWNER_ID` may invoke the agent.
-- Starts a new session for every standalone mention; an explicit mention replying to a registered bot answer resumes that exact branch, including after other branches or gateway restarts.
-- Uses Hermes Runs with a stable `session_id`, matching `X-Hermes-Session-Key` and authoritative branch history. Standard Chat Completions endpoints receive the same bounded transcript in `messages`.
+- Starts a new session for every standalone mention; an explicit mention replying to any registered owner request, placeholder, or bot answer resumes that exact branch, including after other branches or gateway restarts.
+- Uses Hermes Runs with a stable `session_id` and matching `X-Hermes-Session-Key`. `HERMES_NATIVE_SESSIONS=1` lets the dedicated Hermes profile own history and compaction. Standard Chat Completions and legacy Runs retain the bounded gateway transcript.
 - Replaces the initial placeholder with live, privacy-safe activity such as «Открываю страницу…» or «Запускаю тесты…» when Hermes reports a real tool event.
 - Supplies the latest Bot-API-visible profile photo as tool input when an explicit avatar task targets the exact author of a replied message or a `text_mention`. Plain `@username` targets are routed to the guarded Userbot operation instead of being guessed.
-- Persists the delivery queue before acknowledging an update, so long agent runs do not block polling and survive a sidecar restart.
+- Persists requests, frozen Runs payloads and active run IDs before acknowledging updates. After a sidecar restart it resumes polling that run; a lost start response is recovered with the same durable Hermes `Idempotency-Key`.
+- With native sessions, sends additions to an active reply branch through Hermes `/runs/{run_id}/steer`, producing one combined answer. A late or rejected addition becomes the next turn in the same session.
 - Downloads inbound media into a sandbox, caps its size, and sanitizes local paths in every public answer.
 - Preserves the original Telegram `chat_id`, `message_id`, and `sender_id` beside voice/audio media so an installed `userbot` skill can use Telegram-native MTProto transcription instead of silently falling back to Whisper.
 - Stages explicitly allowed local output media through the owner DM before reusing the returned Telegram `file_id` in a public rich reply.
@@ -26,7 +27,7 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 
 ```text
 @bot + no reply                  -> new branch A
-reply to A's answer + @bot        -> continue A
+reply to A's request/answer + @bot -> continue A (steer if running)
 @bot + no reply                  -> new branch B
 reply to an old A answer + @bot   -> return to A
 reply to another person + @bot   -> new branch C, with that quoted message
@@ -52,14 +53,33 @@ up to 23 recent exchanges, bounded to 120,000 characters (30,000 per message).
 This is a bounded conversation window, not an unlimited archive. Anchors and
 history are persisted atomically in the private `runtime/state.json` (0600).
 The retention policy governs gateway state; it does not delete Hermes logs or
-archives. Requests in one branch run sequentially; other branches may run in
-parallel.
+archives. Only one run executes per branch. Additions arriving while it runs are steered into it;
+otherwise they start the next turn. Other branches may run in parallel when workers permit.
+The default remains one worker because browser/tool resources may be shared.
 
-Hermes Runs receives authoritative history even for a fresh session, preventing
-implicit restoration of an unrelated harness transcript. The bootstrap disables
+With `HERMES_NATIVE_SESSIONS=1`, Hermes Runs receives only the new input, stable
+session ID and transport instructions. Hermes restores that exact session's native
+history, including tool results and compaction summaries; the gateway does not
+replace it with a truncated transcript. The gateway retains routing metadata and
+pending work, and clears its compatibility transcript after a successful native
+turn. Existing branch IDs remain unchanged. Before enabling this on an existing
+installation, verify that those IDs exist in the dedicated profile's session store.
+A missing native session must be investigated before migration.
+
+With `HERMES_NATIVE_SESSIONS=0` (the compatibility default), Runs receives the
+bounded authoritative gateway history, including an explicit fresh-session boundary.
+Chat Completions always receives that bounded history. The bootstrap disables
 shared profile memory and external memory providers for the dedicated guest
-profile; persona, skills and tool access remain profile-owned. Existing installs
-must apply the memory settings described in the installation guides.
+profile; persona, skills and tool access remain profile-owned.
+
+Steering is enabled only with native Hermes sessions. Compatibility-mode additions
+remain queued as separate turns so the authoritative mirrored history retains them.
+Steering is delivered at a safe boundary chosen by Hermes; it does not forcibly
+terminate a running tool. The gateway persists acceptance and retires accepted
+additions with the parent job. Hermes' steer endpoint has no idempotency contract:
+a timeout with an unknown outcome is not blindly retried. The addition is retained
+for a subsequent turn with an instruction to check native history before repeating
+any action. A `409` at run completion also becomes a normal same-session turn.
 
 When upgrading from the older 120-second routing, ambiguous legacy anchors are
 not imported. Queued requests survive, but start isolated sessions. An answer
@@ -98,10 +118,10 @@ The gateway is intentionally narrow transport glue. Keep persona, tools, and pol
 
 | Mode | Required endpoint | Context contract |
 | --- | --- | --- |
-| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}`; optional `GET /v1/runs/{run_id}/events` | Receives a stable `session_id`, matching `X-Hermes-Session-Key`, and authoritative `conversation_history`; the SSE endpoint adds live activity updates. |
+| `HERMES_USE_RUNS=1` | `POST /v1/runs`, `GET /v1/runs/{run_id}`; `POST /v1/runs/{run_id}/steer`; optional `GET /v1/runs/{run_id}/events` | Stable `session_id` and matching `X-Hermes-Session-Key`; native history/compaction when enabled, otherwise authoritative `conversation_history`. Durable start idempotency is required for lost-response recovery. |
 | `HERMES_USE_RUNS=0` | OpenAI-style `POST /v1/chat/completions` | Receives a normal `messages` array; this gateway supplies the same bounded local reply history. |
 
-Both modes use the durable bounded history described above. `GUEST_PENDING_ANCHOR_TTL` is obsolete and no longer affects routing. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
+History ownership is selected as described above; both modes keep durable branch routing. `GUEST_PENDING_ANCHOR_TTL` is obsolete and no longer affects routing. Both modes expect a bearer token and return ordinary text. Chat Completions responses must contain `choices[0].message.content`.
 
 ### Telegram-native voice transcription
 
@@ -144,19 +164,113 @@ task has no verified allowlisted artifact, the sidecar performs one corrective
 run in the same isolated session. It never loops or silently chooses a
 similarly named user.
 
+Explicit animation/GIF requests also require a verified media artifact. A failed
+Codex run whose output contains Hermes' subscription-error diagnostic is treated
+as a provider failure, not a saved partial answer: details stay in logs, the chat
+gets a short failure notice, and completed tools are not replayed automatically.
+
 Generated general files are staged through the same private owner-DM bridge as
 images and embedded as Bot API 10.3 `document` blocks. Markdown tables use the
 new compact cell layout. An explicit `<blockquote expandable>` block is kept as
 a native collapsible quotation; ordinary quotations remain ordinary, so the
 renderer does not unexpectedly hide content.
 
+The sidecar injects a capability-aware formatting policy on every Hermes turn,
+including follow-ups in native sessions. It teaches when to use a real comparison
+table, short prose, headings, lists, quotations, optional details, emphasis, code,
+links, footnotes, formulas and media. The contract and examples are documented in
+[Telegram Rich Text formatting](docs/rich-text.md). The renderer preserves table
+alignment, literal/escaped pipes, code spans, heading levels, and nested details
+with their initial open state. Tables wider than Telegram's 20-column limit stay
+readable as preformatted text instead of invalidating the entire rich answer.
+
 ## Live activity status
 
 In Hermes Runs mode, the gateway consumes the structured SSE lifecycle stream and updates the existing Telegram placeholder only when the harness reports actual activity. Each supported action has distinct start, working, completion, and failure phases. Fixed public categories cover planning, skills, tool discovery, browser navigation and interaction, internet search and extraction, command-line work, scripts, tests, code checks, builds, repository work, file search and reading, code changes, documents, media, data, context, task plans, communication, automation, external tools, and subagents.
 
-Long operations rotate through safe working phrases every `GUEST_PROGRESS_HEARTBEAT_INTERVAL` seconds, so a terminal command or browser action does not appear frozen. Terminal previews are inspected only in memory to select a broad category such as tests, build, script, repository, or file search. Raw tool names, arguments, previews, commands, URLs, file names, local paths, partial model output, and model reasoning are never copied into Telegram. Unknown tools use varied generic start/working/completion phrases.
+Production status delivery is event-driven; periodic working-phrase heartbeats are disabled to conserve Telegram request limits. Terminal previews are inspected only in memory to select a broad category such as tests, build, script, repository, or file search. Raw tool names, arguments, previews, commands, URLs, file names, local paths, partial model output, and model reasoning are never copied into Telegram. Unknown tools use varied generic start/working/completion phrases.
 
-Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GUEST_PROGRESS_ENABLED=0` to disable them. If the SSE endpoint is unavailable, final-answer polling continues normally and the placeholder stays unchanged. Chat Completions mode has no tool-event contract, so it deliberately keeps «Думаю…» instead of inventing activity.
+Updates are coalesced and rate-limited by `GUEST_PROGRESS_MIN_INTERVAL`; set `GUEST_PROGRESS_ENABLED=0` to disable them. Completion events wake final-answer reconciliation immediately; an authenticated GET remains authoritative. While SSE is connected, reconciliation runs every five seconds (or the configured poll interval, if longer). If SSE is unavailable, polling uses `HERMES_POLL_INTERVAL`. New owner additions also wake reconciliation, so steering does not wait for the five-second timer.
+
+Set `GUEST_PROGRESS_CATS=1` and configure `GUEST_PLACEHOLDER_CUSTOM_EMOJI_ID` /
+`GUEST_PLACEHOLDER_CUSTOM_EMOJI_ALT` for one custom emoji beside static «Думаю…».
+Telegram animates the sticker client-side; the bot does not edit messages to
+animate dots or rotate working phrases. Status edits follow actual tool/phase
+events, coalesced to at least four seconds apart, with a shared limit across workers.
+Actual tool activity retains its own emoji and label. Telegram flood-control
+pauses suppress cosmetic edits. Final edits wait for `retry_after` and retry the
+same rich payload (up to three attempts, waits up to 120 seconds per rejection);
+a 429 never triggers a plain-text downgrade. Status delivery runs in the background.
+Timers stop and in-flight edits finish before final delivery, so a status cannot
+overwrite the answer.
+
+A strictly matched fresh, text-only greeting (for example, «Хэй» or «hello»)
+uses `model_options.reasoning_effort=low` on the same model and native session.
+Replies, media and substantive requests keep the profile's reasoning settings.
+This reduces unnecessary latency without a canned response or a second model.
+
+## Delivery recovery and readiness
+
+Guest Mode supports one reply per invocation, including in chats where the bot
+is not a member. The default delivery path answers the guest query once and
+edits the returned `inline_message_id`. Rich media uses previously uploaded
+Telegram `file_id` values; an inline edit does not upload new files.
+
+The gateway persists the completed answer and staged media IDs before final
+delivery. Transient failures of an existing inline edit are retried with
+backoff, at most eight delivery attempts, including after a restart. Recovery
+does not call the model or upload the same staged media again.
+Definitively rejected final sends (429) are also retried without repeating the model.
+Transport-level 429 handling shares a cooldown across sends, uploads and edits, honors
+`retry_after`, and preserves the rich payload. Temporary network/server errors
+do not trigger a plain-text downgrade; explicit payload rejection still can.
+
+An upload or new send can succeed even if its response is lost. Such ambiguous
+operations remain in `pending_jobs` with `delivery.phase=review` for operator
+reconciliation instead of being repeated automatically. A failed owner fallback
+does not remove the saved answer. The original guest reply remains the retry
+target; an owner fallback is attempted at most once.
+
+Each attachment has its own durable upload record and checksum. A confirmed
+`file_id` is saved immediately, before the next upload. A definite 429 rejection
+may be retried with backoff; already uploaded files are reused after restart.
+Unknown upload outcomes (including timeouts or server errors), missing receipts
+and changed/missing files retain the answer for review instead of marking a
+text-only response as successfully delivered.
+
+Admission reactions, queue acknowledgements and steering notices use a separate
+FIFO worker. They skip flood-control waits and use short network timeouts.
+Incoming messages and steering do not wait for these cosmetic Telegram requests.
+The task worker coordinates with an outstanding acknowledgement so it reuses
+the existing guest placeholder instead of racing a second `answerGuestQuery`.
+Steering and completion notices are ordered to prevent late queue text from
+overwriting the final acknowledgement.
+
+`--check` and polling startup validate the token's bot username and Guest Mode
+capability. In Hermes Runs mode they also validate the v1 URL, profile health
+and authenticated model discovery. Failures stop startup before consuming
+Telegram updates. Generic Chat Completions mode keeps support for custom
+endpoints without requiring Hermes-specific health or discovery routes.
+
+A missing state file is treated as a first start. An unreadable, malformed or
+structurally invalid existing state file stops startup with `StateLoadError`;
+it is never silently replaced by an empty queue. Preserve that file and restore
+a verified backup before restarting. Automatic rollback to an older offset is
+intentionally avoided because it could replay already executed requests.
+
+State writes skip unchanged data and use compact JSON. With native Hermes
+sessions enabled, old gateway transcripts may be archived using the following
+offline utility while the sidecar is stopped:
+
+```bash
+python3 compact_guest_state.py --state runtime/state.json --hermes-db /path/to/profile/state.db
+# Review the counts, then repeat with --apply.
+```
+
+Every archived conversation must appear in order in the native Hermes database.
+Unverified transcripts are retained. `--apply` saves an owner-only copy of the
+entire original state beside `state.json`, preserves reply anchors and session
+IDs, and never writes to the Hermes database.
 
 ## Privacy and security model
 
@@ -201,3 +315,15 @@ The test suite covers queue durability, context routing, Runs payloads and live 
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+### Native reply quotes
+
+The sidecar preserves the current invocation's `quote` separately from the full
+`reply_to_message`. `telegram_context.quote.selected_text` is the fragment to
+answer about. Both `TextQuote.text` and Bot API 10.4 `rich_texts` are supported;
+quote entities, manual-selection flag and approximate UTF-16 position are kept.
+An external reply carries only its supplied origin/chat/message identifiers,
+without fetching surrounding messages or importing another session.
+
+Reference: [Telegram TextQuote](https://core.telegram.org/bots/api#textquote).
+The sidecar uses Python's standard library and does not pin a Telegram SDK.

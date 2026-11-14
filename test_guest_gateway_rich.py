@@ -2,6 +2,7 @@ import copy
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from guest_gateway import Config, GuestGateway, GuestJob, UploadedMedia
 
@@ -72,6 +73,17 @@ class RichGatewayTests(unittest.TestCase):
             gw._input_rich_message("Короткий факт."),
             {"blocks": [{"type": "paragraph", "text": "Короткий факт."}]},
         )
+
+    def test_cyrillic_slash_words_survive_while_unicode_paths_are_redacted(self):
+        gw = FakeGateway()
+        text = "Из 36 голосовых/аудио/видеосообщений 35 расшифрованы."
+
+        self.assertEqual(gw._sanitize_outbound_text(text), text)
+        self.assertEqual(gw._input_rich_message(text)["blocks"][0]["text"], text)
+        redacted = gw._sanitize_outbound_text("Файлы: /Users/tester/private.txt и /Пользователи/Иван/фото.jpg")
+        self.assertNotIn("/Users/", redacted)
+        self.assertNotIn("/Пользователи/", redacted)
+        self.assertEqual(redacted.count("[локальный файл скрыт]"), 2)
 
     def test_inline_renderer_handles_italic_html_and_currency_without_false_math(self):
         gw = FakeGateway()
@@ -213,6 +225,41 @@ class RichGatewayTests(unittest.TestCase):
         self.assertEqual(gw.calls[1][1]["text"], "# Done\n- ok")
         self.assertEqual(gw.calls[1][1]["message_thread_id"], 42)
 
+    def test_owner_fallback_uses_rich_article(self):
+        gw = FakeGateway()
+
+        gw._send_owner_message("# Разбор\n\nПервый абзац.\n\nВторой абзац.")
+
+        self.assertEqual(len(gw.calls), 1)
+        method, payload = gw.calls[0]
+        self.assertEqual(method, "sendRichMessage")
+        self.assertEqual(payload["chat_id"], gw.cfg.owner_id)
+        self.assertEqual([block["type"] for block in payload["rich_message"]["blocks"]],
+                         ["paragraph", "heading", "paragraph", "paragraph"])
+
+    def test_rejected_owner_article_falls_back_without_losing_long_text(self):
+        gw = FakeGateway(fail_once=["sendRichMessage"])
+        text = "Подробный ответ. " * 400
+
+        gw._send_owner_message(text)
+
+        plain = [payload["text"] for method, payload in gw.calls if method == "sendMessage"]
+        self.assertGreater(len(plain), 1)
+        self.assertTrue(all(len(part) <= 3900 for part in plain))
+        self.assertEqual("".join(plain), "Guest answer fallback:\n\n" + text.strip())
+
+    def test_owner_answer_above_article_limit_preserves_tail(self):
+        gw = FakeGateway()
+        gw.cfg.rich_max_reply_chars = 120
+
+        gw._send_owner_message("A" * 300 + "TAIL")
+
+        self.assertGreater(len(gw.calls), 1)
+        self.assertTrue(all(method == "sendRichMessage" for method, _ in gw.calls))
+        texts = [gw._rich_text_plain(payload["rich_message"]) for _, payload in gw.calls]
+        self.assertTrue(all(len(text) <= 120 for text in texts))
+        self.assertIn("TAIL", texts[-1])
+
     def test_edit_guest_answer_falls_back_to_text_when_rich_fails(self):
         gw = FakeGateway(fail_once=["editMessageText"])
         gw.edit_guest_answer("inline-1", "# Done\n- ok")
@@ -225,6 +272,78 @@ class RichGatewayTests(unittest.TestCase):
         )
         self.assertEqual(gw.calls[1][0], "editMessageText")
         self.assertEqual(gw.calls[1][1], {"inline_message_id": "inline-1", "text": "# Done\n- ok"})
+
+    def test_flood_control_retries_identical_rich_answer_after_required_wait(self):
+        gw = FakeGateway()
+        now = [100.0]
+        waits = []
+        original = gw.tg
+        def send(method, payload, **kwargs):
+            result = original(method, payload, **kwargs)
+            if len(gw.calls) == 1:
+                raise RuntimeError('HTTP 429 {"error_code":429,"parameters":{"retry_after":21}}')
+            return result
+        def sleep(delay):
+            waits.append(delay)
+            now[0] += delay
+        gw.tg = send
+        with patch('guest_gateway.time.monotonic', side_effect=lambda: now[0]), patch('guest_gateway.time.sleep', side_effect=sleep):
+            gw.edit_guest_answer('inline-1', '# Answer\n\nSaved content')
+        self.assertEqual(waits, [21.5])
+        self.assertEqual(len(gw.calls), 2)
+        self.assertEqual(gw.calls[0], gw.calls[1])
+        self.assertIn('rich_message', gw.calls[1][1])
+
+    def test_progress_flood_control_drops_cosmetic_edits_and_final_waits(self):
+        gw = FakeGateway()
+        now = [100.0]
+        original = gw.tg
+        def send(method, payload, **kwargs):
+            result = original(method, payload, **kwargs)
+            if len(gw.calls) == 1:
+                raise RuntimeError('HTTP 429 {"error_code":429,"parameters":{"retry_after":9}}')
+            return result
+        gw.tg = send
+        with patch('guest_gateway.time.monotonic', side_effect=lambda: now[0]), patch('guest_gateway.time.sleep', side_effect=lambda n: now.__setitem__(0, now[0]+n)) as sleep:
+            gw.edit_guest_answer('inline-1', 'Думаю…', progress=True)
+            gw.edit_guest_answer('inline-2', 'Поиск…', progress=True)
+            sleep.assert_not_called()
+            self.assertEqual(len(gw.calls), 1)
+            gw.edit_guest_answer('inline-1', '# Final')
+            sleep.assert_called_once_with(9.5)
+        self.assertEqual(len(gw.calls), 2)
+        self.assertIn('rich_message', gw.calls[-1][1])
+
+    def test_shared_progress_budget_reserves_final_answer(self):
+        gw = FakeGateway()
+        with patch('guest_gateway.time.monotonic', return_value=100.0):
+            gw.edit_guest_answer('inline-1', 'Поиск…', progress=True)
+            gw.edit_guest_answer('inline-2', 'Код…', progress=True)
+            self.assertEqual(len(gw.calls), 1)
+            gw.edit_guest_answer('inline-2', '# Final')
+        self.assertEqual(len(gw.calls), 2)
+
+    def test_long_progress_cooldown_does_not_block_worker_indefinitely(self):
+        gw = FakeGateway()
+        gw.telegram_edit_retry_at = 1000.0
+        with patch('guest_gateway.time.monotonic', return_value=100.0), patch('guest_gateway.time.sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'delivery budget'):
+                gw.edit_guest_answer('inline-1', '# Final')
+            sleep.assert_not_called()
+        self.assertEqual(gw.calls, [])
+
+    def test_repeated_rate_limits_are_bounded_and_never_downgrade(self):
+        gw = FakeGateway()
+        now = [100.0]
+        def send(method, payload, **kwargs):
+            gw.calls.append((method, copy.deepcopy(payload)))
+            raise RuntimeError('HTTP 429 {"error_code":429,"parameters":{"retry_after":3}}')
+        gw.tg = send
+        with patch('guest_gateway.time.monotonic', side_effect=lambda: now[0]), patch('guest_gateway.time.sleep', side_effect=lambda n: now.__setitem__(0, now[0]+n)):
+            with self.assertRaisesRegex(RuntimeError, '429'):
+                gw.edit_guest_answer('inline-1', '# Final')
+        self.assertEqual(len(gw.calls), 3)
+        self.assertTrue(all('rich_message' in p for _, p in gw.calls))
 
     def test_preserves_new_rich_markdown_blocks(self):
         gw = FakeGateway()
@@ -361,7 +480,7 @@ class RichGatewayTests(unittest.TestCase):
 
         prompt = gw._build_hermes_prompt(msg)
 
-        self.assertIn("Standard Markdown is supported", prompt)
+        self.assertIn("Follow the Telegram formatting policy", prompt)
         self.assertIn("Do not emit Telegram API JSON", prompt)
         self.assertIn("telegram_context", prompt)
         self.assertIn("media_context", prompt)

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from guest_gateway import (
     Config,
+    RunEventState,
     GuestGateway,
     MAX_SSE_EVENT_BYTES,
     PROGRESS_ACTIVITIES,
@@ -50,9 +51,9 @@ class ProgressGatewayTests(unittest.TestCase):
             "pytest": "🧪 Запускаю тесты…",
             "exec_command": "⌨️ Запускаю команду…",
             "read_file": "📄 Читаю материалы…",
-            "generate_image": "🎨 Работаю с изображением…",
-            "transcribe_audio": "🎧 Работаю с аудио…",
-            "query_database": "📊 Анализирую данные…",
+            "generate_image": "🎨 Создаю изображение…",
+            "transcribe_audio": "🎧 Распознаю речь…",
+            "query_database": "🗄 Выполняю запрос к данным…",
             "memory_recall": "🧠 Проверяю контекст…",
             "spawn_agent": "🧩 Подключаю дополнительного агента…",
             "private_plugin_name": "🛠 Подключаю нужный инструмент…",
@@ -206,7 +207,7 @@ class ProgressGatewayTests(unittest.TestCase):
                     "run_1",
                     {"Authorization": "Bearer key"},
                     lambda signal: statuses.append(signal.text),
-                    threading.Event(),
+                    RunEventState(),
                 )
 
         self.assertEqual(
@@ -242,9 +243,12 @@ class ProgressGatewayTests(unittest.TestCase):
                 )
                 super().__init__(cfg, state_path=state_path)
                 self.calls: list[tuple[str, dict]] = []
+                self.progress_sent = threading.Event()
 
             def tg(self, method, payload, timeout=60):
                 self.calls.append((method, copy.deepcopy(payload)))
+                if method == "editMessageText":
+                    self.progress_sent.set()
                 if method == "answerGuestQuery":
                     return {"ok": True, "result": {"inline_message_id": "inline-1"}}
                 return {"ok": True, "result": True}
@@ -260,6 +264,8 @@ class ProgressGatewayTests(unittest.TestCase):
                         }
                     )
                 )
+                if not self.progress_sent.wait(2):
+                    raise AssertionError("background progress was not delivered")
                 return "Финальный ответ"
 
             @staticmethod
