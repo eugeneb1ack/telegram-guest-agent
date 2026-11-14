@@ -212,4 +212,48 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(after['reply_sessions']['verified']['messages'],[])
         self.assertEqual(Path(result['archive']).read_bytes(),original)
 
+
+    def test_long_definite_429_final_send_retries_saved_answer_after_restart(self):
+        for kind in ('guest', 'chat'):
+            with self.subTest(kind=kind):
+                g = self.gateway()
+                g.cfg.placeholder_enabled = kind == 'guest'
+                job = self.job(g)
+                job.delivery = {'phase': 'ready', 'text': 'saved answer', 'media': [],
+                                'failed': False, 'attempts': 0}
+                method = 'answer_guest' if kind == 'guest' else 'send_chat_message'
+                rejected = Mock(side_effect=RuntimeError(
+                    'HTTP 429 {"error_code":429,"parameters":{"retry_after":180}}'))
+                setattr(g, method, rejected)
+                g._send_owner_message = Mock()
+                before = time.time()
+                g._deliver_saved_job(job)
+                self.assertEqual(job.delivery['phase'], 'retry')
+                self.assertGreaterEqual(job.delivery['next_at'], before + 180)
+                restored = GuestGateway(g.cfg, g.state_path)
+                self.assertTrue(restored.jobs.empty())
+                restored.call_hermes = Mock(side_effect=AssertionError('must not infer again'))
+                restored._stage_delivery_media = Mock(side_effect=AssertionError('must not upload again'))
+                restored.tg = Mock(return_value={'ok': True, 'result': True})
+                accepted = Mock(return_value='known-inline' if kind == 'guest' else {'message_id': 900})
+                setattr(restored, method, accepted)
+                with patch('guest_gateway.time.time', return_value=job.delivery['next_at'] + 1):
+                    restored._schedule_delivery_retries()
+                self.drain(restored)
+                self.assertFalse(restored.pending_jobs)
+                accepted.assert_called_once()
+                restored.call_hermes.assert_not_called()
+                restored._stage_delivery_media.assert_not_called()
+
+    def test_definite_429_new_send_retry_limit_is_bounded(self):
+        g = self.gateway()
+        job = self.job(g)
+        job.delivery = {'phase': 'ready', 'text': 'saved answer', 'media': [],
+                        'failed': False, 'attempts': 7}
+        g.answer_guest = Mock(side_effect=FLOOD)
+        g._send_owner_message = Mock()
+        g._deliver_saved_job(job)
+        self.assertEqual(job.delivery['attempts'], 8)
+        self.assertEqual(job.delivery['phase'], 'review')
+
 if __name__=='__main__':unittest.main()

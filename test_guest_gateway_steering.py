@@ -330,5 +330,38 @@ class SteeringTests(unittest.TestCase):
             release.set();r.close()
 
 
+    def test_compatibility_additions_run_as_turns_and_preserve_history(self):
+        gw = self.make_gateway()
+        gw.cfg.hermes_native_sessions = False
+        parent = self.admit(gw, 40)
+        self.admit(gw, 41, parent.message)
+        posts, polls, steers = [], {}, []
+        def http(url, payload=None, **kwargs):
+            if url.endswith('/steer'):
+                steers.append(payload)
+                return {'accepted': True}
+            if url.endswith('/runs'):
+                posts.append(payload)
+                return {'run_id': f'r{len(posts)}'}
+            polls[url] = polls.get(url, 0) + 1
+            if url.endswith('/r1') and polls[url] == 1:
+                return {'status': 'running'}
+            return {'status': 'completed', 'output': 'done'}
+        with patch('guest_gateway.http_json', side_effect=http):
+            gw.start_worker()
+            try:
+                self.wait_idle(gw)
+            finally:
+                gw.stop_worker()
+        self.assertEqual(steers, [])
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[0]['session_id'], posts[1]['session_id'])
+        sid = posts[0]['session_id']
+        history = gw.reply_sessions[sid]['messages']
+        self.assertIn('question 41', json.dumps(history))
+        self.assertEqual([turn['role'] for turn in history], ['user', 'assistant', 'user', 'assistant'])
+        self.assertIn('question 40', json.dumps(posts[1]['conversation_history']))
+
+
 if __name__ == '__main__':
     unittest.main()

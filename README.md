@@ -17,7 +17,7 @@ Owner-only Telegram Guest Mode gateway for Hermes and compatible AI harnesses. I
 - Replaces the initial placeholder with live, privacy-safe activity such as «Открываю страницу…» or «Запускаю тесты…» when Hermes reports a real tool event.
 - Supplies the latest Bot-API-visible profile photo as tool input when an explicit avatar task targets the exact author of a replied message or a `text_mention`. Plain `@username` targets are routed to the guarded Userbot operation instead of being guessed.
 - Persists requests, frozen Runs payloads and active run IDs before acknowledging updates. After a sidecar restart it resumes polling that run; a lost start response is recovered with the same durable Hermes `Idempotency-Key`.
-- Sends additions to an active reply branch through Hermes `/runs/{run_id}/steer`, producing one combined answer. A late or rejected addition becomes the next turn in the same session.
+- With native sessions, sends additions to an active reply branch through Hermes `/runs/{run_id}/steer`, producing one combined answer. A late or rejected addition becomes the next turn in the same session.
 - Downloads inbound media into a sandbox, caps its size, and sanitizes local paths in every public answer.
 - Preserves the original Telegram `chat_id`, `message_id`, and `sender_id` beside voice/audio media so an installed `userbot` skill can use Telegram-native MTProto transcription instead of silently falling back to Whisper.
 - Stages explicitly allowed local output media through the owner DM before reusing the returned Telegram `file_id` in a public rich reply.
@@ -72,6 +72,8 @@ Chat Completions always receives that bounded history. The bootstrap disables
 shared profile memory and external memory providers for the dedicated guest
 profile; persona, skills and tool access remain profile-owned.
 
+Steering is enabled only with native Hermes sessions. Compatibility-mode additions
+remain queued as separate turns so the authoritative mirrored history retains them.
 Steering is delivered at a safe boundary chosen by Hermes; it does not forcibly
 terminate a running tool. The gateway persists acceptance and retires accepted
 additions with the parent job. Hermes' steer endpoint has no idempotency contract:
@@ -218,6 +220,7 @@ The gateway persists the completed answer and staged media IDs before final
 delivery. Transient failures of an existing inline edit are retried with
 backoff, at most eight delivery attempts, including after a restart. Recovery
 does not call the model or upload the same staged media again. Transport-level
+Definitively rejected final sends (429) are also retried without repeating the model.
 429 handling shares a cooldown across sends, uploads and edits, honors
 `retry_after`, and preserves the rich payload. Temporary network/server errors
 do not trigger a plain-text downgrade; explicit payload rejection still can.

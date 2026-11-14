@@ -144,6 +144,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_steering_and_completion_do_not_wait_for_inflight_ack(self):
         g = self.gateway()
         g.cfg.hermes_use_runs = True
+        g.cfg.hermes_native_sessions = True
         first = update(601, 'parent', 'task')
         g.handle_guest(first)
         parent = g.pending_jobs['update:601']
@@ -182,6 +183,7 @@ class ReliabilityTests(unittest.TestCase):
     def test_cosmetic_flood_wait_does_not_sleep_or_delay_steering(self):
         g = self.gateway()
         g.cfg.hermes_use_runs = True
+        g.cfg.hermes_native_sessions = True
         first = update(701, 'parent', 'task')
         g.handle_guest(first)
         parent = g.pending_jobs['update:701']; parent.run_id = 'active-run'

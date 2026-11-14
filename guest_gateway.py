@@ -1272,6 +1272,10 @@ class GuestGateway:
 
     def _drain_steering(self, parent: GuestJob) -> None:
         """Only the run's polling worker sends steering, in durable admission order."""
+        # The compatibility transcript cannot represent an in-flight addition.
+        # Keep it queued as the next turn so authoritative history retains it.
+        if not self.cfg.hermes_native_sessions:
+            return
         with self.state_lock:
             candidates = [j for j in self.pending_jobs.values()
                           if j.key != parent.key and j.context_thread_id == parent.context_thread_id
@@ -3256,10 +3260,11 @@ class GuestGateway:
                                        is_big=not d.get("failed"))
             self._complete_steered_jobs(job, bool(d.get("failed")))
         except Exception as error:
-            # Editing a known inline ID is repeatable. New sends/uploads with
-            # uncertain outcomes stay durable but require reconciliation.
-            safe_retry = (bool(job.inline_message_id) and d.get("send_kind") == "edit" and "media" in d
-                          and (telegram_transient(error) or not re.search(r"HTTP [34]\d\d", str(error)))
+            # A parsed 429 definitively rejects even a new send. Unknown send
+            # outcomes still need reconciliation; known inline edits can repeat.
+            repeatable_edit = (bool(job.inline_message_id) and d.get("send_kind") == "edit" and "media" in d
+                               and (telegram_transient(error) or not re.search(r"HTTP [34]\d\d", str(error))))
+            safe_retry = ((telegram_retry_after(error) is not None or repeatable_edit)
                           and int(d.get("attempts", 0)) < 8)
             attempts = int(d.get("attempts", 0))
             if isinstance(error, MediaDeliveryError):
