@@ -219,9 +219,9 @@ Telegram `file_id` values; an inline edit does not upload new files.
 The gateway persists the completed answer and staged media IDs before final
 delivery. Transient failures of an existing inline edit are retried with
 backoff, at most eight delivery attempts, including after a restart. Recovery
-does not call the model or upload the same staged media again. Transport-level
+does not call the model or upload the same staged media again.
 Definitively rejected final sends (429) are also retried without repeating the model.
-429 handling shares a cooldown across sends, uploads and edits, honors
+Transport-level 429 handling shares a cooldown across sends, uploads and edits, honors
 `retry_after`, and preserves the rich payload. Temporary network/server errors
 do not trigger a plain-text downgrade; explicit payload rejection still can.
 
