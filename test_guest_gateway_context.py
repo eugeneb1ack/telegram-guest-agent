@@ -21,7 +21,7 @@ def gateway():
         owner_id=OWNER_ID,
         hermes_url="http://127.0.0.1:8644/v1",
         hermes_key="k",
-        model="gpt-5.5",
+        model="test-model",
         bot_username="guest_bot",
     )
     tmp = tempfile.TemporaryDirectory()
